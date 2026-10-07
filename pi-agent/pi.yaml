@@ -8,7 +8,7 @@ spec:
   byo: {}
   workload:
     image: hguerrero0/pi-agent@sha256:217e103f5fb17f32c745813a5c8809f0031877a2194ae2315b46001e210ee643
-    command: ["/usr/local/bin/pi-a2a-adapter"]   # the adapter you built in Step 2
+    command: ["/usr/local/bin/pi-a2a-adapter"]   # the adapter binary baked into the image
   env:
     - name: OPENROUTER_API_KEY
       value: kagent-credential-injected   # inert placeholder; the gateway injects the real key

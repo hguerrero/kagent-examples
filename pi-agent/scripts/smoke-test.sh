@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Smoke test for the Pi agent on Agent Substrate.
 #
-# Runs the Step 6 flow from the post: create a session, give Pi a task, let the
+# Runs a suspend-and-resume check: create a session, give Pi a task, let the
 # actor suspend, then resume it with a follow-up that only works if the adapter
 # restored Pi's conversation. Prints the actor state between turns so you can
 # watch it sleep. Needs: kagent CLI (pointed at the controller), kubectl,
@@ -30,7 +30,7 @@ echo "session: $SESSION_ID"
 echo "== turn 1: create a file"
 kagent agent invoke --session "$SESSION_ID" \
   --task "Create $WORD.txt containing the word $WORD. Reply in one short sentence." \
-  || fail "turn 1 was not accepted (see Troubleshooting in the post)"
+  || fail "turn 1 was not accepted (see TROUBLESHOOTING.md)"
 
 # The actor suspends a few seconds after the turn settles.
 for _ in $(seq 1 15); do

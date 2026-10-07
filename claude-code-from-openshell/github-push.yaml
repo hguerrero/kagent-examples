@@ -1,0 +1,34 @@
+apiVersion: api.kagent.dev/v1alpha3
+kind: RemoteMCPServer
+metadata:
+  name: github-mcp
+  namespace: kagent
+spec:
+  description: GitHub's remote MCP server, limited to a few repository tools.
+  url: https://api.githubcopilot.com/mcp/
+  protocol: STREAMABLE_HTTP
+  headersFrom:
+    - name: Authorization            # the Secret holds the full value, "Bearer <token>"
+      valueFrom:
+        type: Secret
+        name: github-mcp-auth
+        key: Authorization
+    - name: X-MCP-Tools              # GitHub filters the tool list on the server side
+      value: get_file_contents,create_branch,create_or_update_file,push_files
+---
+# Same name as in claude.yaml, so applying this file updates the template.
+apiVersion: api.kagent.dev/v1alpha3
+kind: AgentTemplate
+metadata:
+  name: claude-template
+  namespace: kagent
+spec:
+  description: Claude Code, running on Agent Substrate.
+  modelConfig:
+    name: anthropic-model-config
+  tools:
+    - mcp:
+        server:
+          kind: RemoteMCPServer
+          name: github-mcp
+        requireApproval: true        # pause before every GitHub tool call
