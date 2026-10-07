@@ -2,16 +2,29 @@
 
 Run the [Pi coding agent](https://github.com/earendil-works/pi) on [kagent](https://kagent.dev) 1.x and Agent Substrate, with [OpenRouter](https://openrouter.ai) as the model provider. Idle agents suspend to a snapshot and free their worker, then resume on the next message with the conversation intact.
 
-This is the companion example for the post *From OpenShell to Agent Substrate: Moving Your Agent Sandbox to kagent* ([TODO-POST-URL](TODO-POST-URL)). The post explains the migration step by step; this folder holds the files it uses, so you can clone and run them. It is part of [kagent-examples](../README.md).
+This example is a migration of NVIDIA OpenShell's [Run Pi with OpenRouter](https://docs.nvidia.com/openshell/latest/tutorials/run-pi-with-openrouter) tutorial: the same Pi image, now behind a small adapter, with kagent resources in place of sandbox flags. It is part of [kagent-examples](../README.md). For Claude Code, which kagent supports out of the box and needs no adapter, see [`claude-code-from-openshell`](../claude-code-from-openshell/).
+
+## What maps to what
+
+| OpenShell tutorial | This example |
+| :--- | :--- |
+| `Dockerfile.pi` and `docker build` | The same Dockerfile plus the adapter, pushed to a registry and referenced **by digest** |
+| Provider profile and credential for `openrouter.ai` | A `Secret` and a `ModelConfig`; the gateway allows the destination and injects the credential |
+| `openshell sandbox create --from ... -- pi` | `Harness`, `AgentTemplate`, and `Agent` (`pi.yaml`), and a session per conversation |
+| `openshell policy get` and `openshell logs` | Egress policy derived from the template, and the egress gateway logs |
+| `--upload .:/workspace` | `kagent sandbox upload` for scratch sandboxes |
+| A sandbox that lives until you delete it | Actors that suspend when idle and resume on the next request |
+| Pi runs in a terminal (TTY) | `pi-a2a-adapter` speaks A2A to kagent and drives `pi --mode rpc` (the new work) |
 
 ## How it works
 
 Pi is a terminal app, and kagent talks to agents over A2A. A small Go adapter sits in front of Pi and translates between the two.
 
-```text
-kagent  --A2A (gRPC, port 80)-->  pi-a2a-adapter  --JSON lines on stdin/stdout-->  pi --mode rpc
-                                        |
-                                        +-- writes Pi's session file path to /data/adapter/pi-session
+```mermaid
+flowchart LR
+    kagent["kagent"] -->|"A2A over gRPC, port 80"| adapter["pi-a2a-adapter"]
+    adapter -->|"JSON lines on stdin/stdout"| pi["pi --mode rpc"]
+    adapter -.->|"writes Pi's session file path"| pointer[("/data/adapter/<br/>pi-session")]
 ```
 
 - The adapter serves A2A on port 80 and `/readyz` on 8081 (kagent's Go ADK provides both), starts `pi --mode rpc`, and streams Pi's reply back as it arrives.
@@ -20,36 +33,36 @@ kagent  --A2A (gRPC, port 80)-->  pi-a2a-adapter  --JSON lines on stdin/stdout--
 
 ## Layout
 
-| Path | What it is | Post step |
-| :--- | :--- | :--- |
-| `adapter/` | The A2A-to-Pi adapter (`main.go`, `go.mod`, `go.sum`) | 2 |
-| `Dockerfile.pi` | Builds the adapter, then Pi on `node:24-bookworm-slim` | 2 |
-| `modelconfig-openrouter.yaml` | `ModelConfig` for OpenRouter (OpenAI-compatible) | 3 |
-| `pi.yaml` | `Harness`, `AgentTemplate`, and `Agent` for Pi | 5 |
-| `scripts/smoke-test.sh` | Runs a turn, waits for suspend, resumes, and checks recall | 6 |
-| `sandboxtemplate.yaml` | Optional scratch `SandboxTemplate` that reuses the Pi image | Bonus |
-| `TROUBLESHOOTING.md` | Fixes for the errors you are most likely to hit | 6 |
+| Path | What it is |
+| :--- | :--- |
+| `adapter/` | The A2A-to-Pi adapter (`main.go`, `go.mod`, `go.sum`) |
+| `Dockerfile.pi` | Builds the adapter, then Pi on `node:24-bookworm-slim` |
+| `modelconfig-openrouter.yaml` | `ModelConfig` for OpenRouter (OpenAI-compatible) |
+| `pi.yaml` | `Harness`, `AgentTemplate`, and `Agent` for Pi |
+| `scripts/smoke-test.sh` | Runs a turn, waits for suspend, resumes, and checks recall |
+| `sandboxtemplate.yaml` | Optional scratch `SandboxTemplate` that reuses the Pi image |
+| `TROUBLESHOOTING.md` | Fixes for the errors you are most likely to hit |
 
 ## Prerequisites
 
-- The base setup from the [repo README](../README.md#prerequisites): a cluster with Agent Substrate and kagent 1.x installed, plus `kubectl`, the `kagent` CLI, `kubectl-ate`, and `jq`. Post Step 1 walks through the install.
+- The base setup from the [repo README](../README.md#prerequisites): a cluster with Agent Substrate and kagent 1.x installed, plus `kubectl`, the `kagent` CLI, `kubectl-ate`, and `jq`.
 - Docker, if you build your own image.
 - An [OpenRouter API key](https://openrouter.ai/keys). The default model is a free one, so no credits are needed.
 
 ## Quickstart
 
 ```bash
-# 1. Secret and model (post Step 3)
+# 1. Secret and model
 export OPENROUTER_API_KEY=<your OpenRouter key>
 kubectl create secret generic kagent-openrouter -n kagent \
   --from-literal PROVIDER_API_KEY="$OPENROUTER_API_KEY"
 kubectl apply -f modelconfig-openrouter.yaml
 
-# 2. The agent (post Step 5)
+# 2. The agent
 kubectl apply -f pi.yaml
 kagent agent get pi            # wait for READY = True; the first time takes a minute or so
 
-# 3. Try it (post Step 6)
+# 3. Try it
 kubectl port-forward -n kagent svc/kagent-controller 8083:8083 &
 ./scripts/smoke-test.sh
 ```
@@ -122,10 +135,25 @@ kubectl apply -f sandboxtemplate.yaml
 kubectl wait --for=condition=Ready sandboxtemplate/pi-scratch -n kagent --timeout=120s
 SANDBOX_ID=$(kagent sandbox create pi-scratch --request-id pi-scratch-1 -o json | jq -r '.id')
 kagent sandbox exec $SANDBOX_ID -- node --version
+```
+
+Commands start in `/data/workspace`, the durable directory. Move files in and out, and suspend and resume the sandbox:
+
+```bash
+echo "# notes from the host" > notes.md
+kagent sandbox templates
+kagent sandbox upload $SANDBOX_ID ./notes.md /data/workspace/notes.md
+kagent sandbox exec $SANDBOX_ID -- sh -c 'wc -c /data/workspace/notes.md > /data/workspace/out.txt'
+kagent sandbox download $SANDBOX_ID /data/workspace/out.txt ./out.txt
+cat out.txt                      # 22 /data/workspace/notes.md
+
+kagent sandbox suspend $SANDBOX_ID
+kagent sandbox resume $SANDBOX_ID
+kagent sandbox exec $SANDBOX_ID -- cat /data/workspace/notes.md    # files under /data survive
 kagent sandbox delete $SANDBOX_ID
 ```
 
-The post's Bonus section covers upload, download, suspend, and resume.
+`--request-id` makes `create` safe to retry: the same ID and inputs return the same sandbox, a new ID creates a second one, and reusing an ID with different inputs (such as a different `--ttl`) fails with `request_id was used for different input`. A sandbox expires on its own, one hour after creation by default (`--ttl` on `create` changes that), and activity does not extend it. Suspending interrupts whatever is running, so let a command finish first. The [standalone sandboxes docs](https://kagent.dev/docs/kagent/1.x/substrate-runtime/standalone-sandboxes/) list every Helm value and the full command set.
 
 ## Clean up
 
@@ -152,7 +180,7 @@ Validated end to end on 2026-10-06 on a local `kind` cluster (Kubernetes 1.37.0,
 | Node | 24 (`node:24-bookworm-slim`) |
 
 What was run:
-- The adapter builds and passes `go vet`, and the post's `go mod` steps reproduce `go.mod` and `go.sum` exactly.
+- The adapter builds and passes `go vet`, and the `go mod` commands in the Notes section reproduce `go.mod` and `go.sum` exactly.
 - The Dockerfile builds and passes the image checks above.
 - All manifests pass a server-side dry run against the kagent CRDs.
 - Nine turns across three sessions completed, with each resume restoring the earlier conversation.
@@ -169,6 +197,16 @@ See [TROUBLESHOOTING.md](TROUBLESHOOTING.md) for the `input was not accepted` er
 
 - The actor runs as root (uid 0) inside its gVisor sandbox, so the `USER node` line in `Dockerfile.pi` does not decide file ownership at run time. The durable `/data` volume is empty and root-owned on first start, and the adapter creates `/data/workspace` and `/data/pi-agent/sessions` itself.
 - The first cluster run used an earlier single-arch (arm64) build of the image, from an earlier revision of `Dockerfile.pi` that also created `/data/workspace` in the image. That makes no difference at run time, because the durable volume is mounted over `/data` and hides anything the image put there. The multi-arch image now in `pi.yaml` was then rolled out and passed `scripts/smoke-test.sh` on the same arm64 cluster. Its amd64 variant was only checked by starting `pi --version` under emulation. It has not run on an amd64 cluster.
+- To recreate the adapter's module (Go 1.27 or later), pin the kagent ADK to the commit behind `v1.0.0-alpha7`, and repeat the `replace` that kagent uses:
+
+  ```bash
+  cd adapter
+  go mod init example.com/pi-a2a-adapter
+  go get github.com/kagent-dev/kagent/go@542e0a7a82f0f32d09c398f9c56319a3f617c93a
+  go mod edit -replace github.com/agent-substrate/substrate=github.com/kagent-dev/substrate@v0.3.0-alpha3
+  go mod tidy
+  ```
+
 - The adapter uses the same pattern as kagent's own Claude Code harness. Its dependencies are pinned to the `v1.0.0-alpha7` commit, and `go.mod` repeats the `replace` for the Substrate API types because Go ignores `replace` directives in dependencies.
 
 ## License
