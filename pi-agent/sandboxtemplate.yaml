@@ -1,0 +1,16 @@
+apiVersion: api.kagent.dev/v1alpha3
+kind: SandboxTemplate
+metadata:
+  name: pi-scratch
+  namespace: kagent
+spec:
+  workload:
+    image: hguerrero0/pi-agent@sha256:217e103f5fb17f32c745813a5c8809f0031877a2194ae2315b46001e210ee643
+  env:
+    - name: LANG
+      value: C.UTF-8
+  substrate:
+    workerPoolRef:
+      name: kagent-default
+    snapshotPolicy:
+      location: s3://ate-snapshots/kagent/

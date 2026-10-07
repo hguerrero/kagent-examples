@@ -1,0 +1,12 @@
+apiVersion: api.kagent.dev/v1alpha3
+kind: ModelConfig
+metadata:
+  name: openrouter-model-config
+  namespace: kagent
+spec:
+  apiKeySecret: kagent-openrouter
+  apiKeySecretKey: PROVIDER_API_KEY
+  model: nvidia/nemotron-3-ultra-550b-a55b:free
+  provider: OpenAI
+  openAI:
+    baseUrl: https://openrouter.ai/api/v1

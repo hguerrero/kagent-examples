@@ -1,0 +1,46 @@
+---
+apiVersion: api.kagent.dev/v1alpha3
+kind: Harness
+metadata:
+  name: pi-harness
+  namespace: kagent
+spec:
+  byo: {}
+  workload:
+    image: hguerrero0/pi-agent@sha256:217e103f5fb17f32c745813a5c8809f0031877a2194ae2315b46001e210ee643
+    command: ["/usr/local/bin/pi-a2a-adapter"]   # the adapter you built in Step 2
+  env:
+    - name: OPENROUTER_API_KEY
+      value: kagent-credential-injected   # inert placeholder; the gateway injects the real key
+    - name: PI_OFFLINE
+      value: "1"   # skip Pi's startup calls to pi.dev, which the default-deny egress blocks
+    - name: PI_PROVIDER
+      value: openrouter
+    - name: PI_MODEL
+      value: nvidia/nemotron-3-ultra-550b-a55b:free
+  substrate:
+    workerPoolRef:
+      name: kagent-default
+    snapshotPolicy:
+      location: s3://ate-snapshots/kagent/
+---
+apiVersion: api.kagent.dev/v1alpha3
+kind: AgentTemplate
+metadata:
+  name: pi-template
+  namespace: kagent
+spec:
+  description: Pi coding agent, running on Agent Substrate.
+  modelConfig:
+    name: openrouter-model-config
+---
+apiVersion: api.kagent.dev/v1alpha3
+kind: Agent
+metadata:
+  name: pi
+  namespace: kagent
+spec:
+  templateRef:
+    name: pi-template
+  harnessRef:
+    name: pi-harness

@@ -1,0 +1,25 @@
+# Stage 1: build the adapter
+FROM golang:1.27 AS adapter-build
+WORKDIR /src
+COPY adapter/go.mod adapter/go.sum ./
+RUN go mod download
+COPY adapter/main.go ./
+RUN CGO_ENABLED=0 go build -trimpath -o /pi-a2a-adapter .
+
+# Stage 2: Pi, as in the OpenShell tutorial
+FROM node:24-bookworm-slim
+ARG PI_VERSION=latest
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends bash ca-certificates fd-find git ripgrep \
+    && ln -s /usr/bin/fdfind /usr/local/bin/fd \
+    && rm -rf /var/lib/apt/lists/*
+RUN npm install -g --ignore-scripts "@earendil-works/pi-coding-agent@${PI_VERSION}"
+
+# New: the adapter. The durable /data volume is mounted over this path at
+# run time, so the adapter creates its directories there on start.
+COPY --from=adapter-build /pi-a2a-adapter /usr/local/bin/pi-a2a-adapter
+
+USER node
+WORKDIR /home/node
+ENV PI_CODING_AGENT_DIR=/data/pi-agent
+EXPOSE 80 8081
