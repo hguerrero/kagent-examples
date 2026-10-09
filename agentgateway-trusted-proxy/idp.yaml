@@ -1,0 +1,84 @@
+# A small OIDC provider for the walkthrough: Dex with two static users. Use your
+# own identity provider (Keycloak, Okta, Entra ID) in a real cluster. The
+# placeholders are filled in by the commands in the README.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: idp
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dex
+  namespace: idp
+data:
+  config.yaml: |
+    issuer: https://dex.kagent.localtest.me__PORT__
+    storage:
+      type: memory
+    web:
+      http: 0.0.0.0:5556
+    oauth2:
+      skipApprovalScreen: true
+      passwordConnector: local
+    enablePasswordDB: true
+    staticClients:
+      - id: kagent
+        name: kagent
+        secret: __CLIENT_SECRET__
+        redirectURIs:
+          - https://kagent.localtest.me__PORT__/oauth2/callback
+    staticPasswords:
+      - email: alice@example.com
+        username: alice
+        userID: 6f1c9a52-8d0e-4c71-a3b5-0a1d9c2e7f10
+        hash: "__ALICE_HASH__"
+      - email: bob@example.com
+        username: bob
+        userID: b2d47e90-5c3a-49f8-8e61-3f7a1b0c9d24
+        hash: "__BOB_HASH__"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dex
+  namespace: idp
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: dex
+  template:
+    metadata:
+      labels:
+        app: dex
+    spec:
+      containers:
+        - name: dex
+          image: ghcr.io/dexidp/dex:v2.46.0
+          args: ["dex", "serve", "/etc/dex/config.yaml"]
+          ports:
+            - containerPort: 5556
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 5556
+          volumeMounts:
+            - name: config
+              mountPath: /etc/dex
+      volumes:
+        - name: config
+          configMap:
+            name: dex
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: dex
+  namespace: idp
+spec:
+  selector:
+    app: dex
+  ports:
+    - port: 5556
+      targetPort: 5556

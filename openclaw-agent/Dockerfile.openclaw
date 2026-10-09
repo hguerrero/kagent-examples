@@ -1,0 +1,26 @@
+# Stage 1: build the adapter
+FROM --platform=$BUILDPLATFORM golang:1.27 AS adapter-build
+ARG TARGETOS TARGETARCH
+WORKDIR /src
+COPY adapter/go.mod adapter/go.sum ./
+RUN go mod download
+COPY adapter/*.go ./
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -o /openclaw-a2a-adapter .
+
+# Stage 2: OpenClaw from npm, on the same base as the Pi example. The npm
+# package is about 700 MB; the official image is over 5 GB, and 2.7 GB of that
+# is the full pnpm install tree under node_modules/.pnpm.
+FROM node:24-bookworm-slim
+ARG OPENCLAW_VERSION=2026.9.9
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends bash ca-certificates curl git python3 ripgrep \
+    && rm -rf /var/lib/apt/lists/*
+RUN npm install -g --ignore-scripts "openclaw@${OPENCLAW_VERSION}"
+
+# The adapter. The durable /data volume is mounted over its path at run time,
+# so the adapter creates its directories there on start.
+COPY --from=adapter-build /openclaw-a2a-adapter /usr/local/bin/openclaw-a2a-adapter
+
+# The actor runs as root inside its gVisor sandbox, so there is no USER line.
+WORKDIR /data
+EXPOSE 80 8081

@@ -8,10 +8,14 @@ Worked examples for [kagent](https://kagent.dev) 1.x and Agent Substrate. Each e
 | :--- | :--- | :--- |
 | [`claude-code-from-openshell`](claude-code-from-openshell/) | Migrate Claude Code from the NVIDIA OpenShell GitHub push tutorial to Agent Substrate with kagent's built-in Claude runtime (no adapter), gateway credential injection, a GitHub MCP server with approval gates, and suspend and resume | kagent 1.0.0-alpha7, Substrate 0.3.0-alpha3 |
 | [`pi-agent`](pi-agent/) | Run the Pi coding agent on Agent Substrate through kagent's bring-your-own runtime, with an A2A adapter, OpenRouter credential injection, and suspend and resume that keeps the conversation | kagent 1.0.0-alpha7, Substrate 0.3.0-alpha3 |
+| [`openclaw-agent`](openclaw-agent/) | Run OpenClaw on Agent Substrate through kagent's bring-your-own runtime, with an A2A-to-ACP adapter, exec approvals that pause the actor, and an agentgateway that limits the harness to four read-only Kubernetes tools. The kagent 1.x version of the 0.10.1 `AgentHarness` setup | kagent 1.0.0-alpha7, Substrate 0.3.0-alpha3 |
+| [`agentgateway-trusted-proxy`](agentgateway-trusted-proxy/) | Run kagent with real user identity: OIDC sign-in through Dex, the bundled oauth2-proxy, the controller in `trusted-proxy` mode, a gateway for TLS and routing, and the NetworkPolicies the chart does not ship. Lists what it gives you and what it does not, including the missing authorization. Needs only a running kagent 1.x | kagent 1.0.0-alpha7, oauth2-proxy 7.15.5, Dex v2.46.0, agentgateway v1.6.0 |
 
 ## Prerequisites
 
-Every example needs the same base setup:
+The examples that run agents on Agent Substrate (`claude-code-from-openshell`, `pi-agent`, `openclaw-agent`) need the same base setup. `agentgateway-trusted-proxy` needs only a running kagent 1.x and lists its own prerequisites.
+
+The Substrate examples need:
 
 - A Kubernetes cluster (1.37 or later, with the `certificates.k8s.io/v1beta1` API enabled) running Agent Substrate and kagent 1.x, with a worker pool named `kagent-default`.
 - On your machine: `kubectl`, `helm`, the `kagent` CLI, the `kubectl-ate` plugin, `jq`, and `openssl`. Docker is needed for examples that build an image.

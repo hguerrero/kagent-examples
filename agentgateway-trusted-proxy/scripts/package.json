@@ -1,0 +1,9 @@
+{
+  "name": "kagent-trusted-proxy-checks",
+  "private": true,
+  "type": "module",
+  "description": "Browser check for the trusted-proxy example. Drives the Chrome you already have.",
+  "dependencies": {
+    "playwright-core": "^1.50.0"
+  }
+}
