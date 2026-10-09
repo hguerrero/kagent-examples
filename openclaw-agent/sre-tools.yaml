@@ -1,0 +1,29 @@
+# The gateway's MCP endpoint as a kagent RemoteMCPServer, bound to the template.
+# Same template name as openclaw.yaml, so applying this file updates it.
+apiVersion: api.kagent.dev/v1alpha3
+kind: RemoteMCPServer
+metadata:
+  name: sre-tools
+  namespace: kagent
+spec:
+  description: Four read-only Kubernetes tools, published by agentgateway.
+  url: http://tools-gateway.agentgateway-system.svc.cluster.local/mcp
+  protocol: STREAMABLE_HTTP
+---
+apiVersion: api.kagent.dev/v1alpha3
+kind: AgentTemplate
+metadata:
+  name: openclaw-template
+  namespace: kagent
+spec:
+  description: OpenClaw, running on Agent Substrate.
+  systemPrompt: |
+    You are OpenClaw running as a kagent agent. Keep answers short.
+    You investigate Kubernetes with the tools you are given. Never claim to have changed anything.
+  modelConfig:
+    name: anthropic-model-config
+  tools:
+    - mcp:
+        server:
+          kind: RemoteMCPServer
+          name: sre-tools

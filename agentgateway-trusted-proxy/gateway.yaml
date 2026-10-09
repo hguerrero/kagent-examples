@@ -1,0 +1,30 @@
+# One Gateway for kagent and the identity provider. It lives in its own namespace
+# and accepts routes only from the kagent and idp namespaces. TLS ends here.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: gateway-system
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: kagent
+  namespace: gateway-system
+spec:
+  gatewayClassName: agentgateway
+  listeners:
+    - name: https
+      protocol: HTTPS
+      port: 443
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - name: kagent-tls
+      allowedRoutes:
+        namespaces:
+          from: Selector
+          selector:
+            matchExpressions:
+              - key: kubernetes.io/metadata.name
+                operator: In
+                values: [kagent, idp]

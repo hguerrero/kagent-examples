@@ -1,0 +1,45 @@
+# The controller trusts whatever identity arrives on its port, because
+# oauth2-proxy has already checked it. Anything that can reach the controller
+# without going through oauth2-proxy can claim to be any user. The chart does not
+# ship these policies, so they are part of the design. They need a CNI that
+# enforces NetworkPolicy.
+#
+# The UI accepts traffic only from oauth2-proxy. The controller accepts traffic
+# only from pods in the kagent namespace (the UI, the agents and their workers)
+# and from ate-system (Agent Substrate). Every pod in kagent is treated as
+# trusted. Tighten the selectors if that is too wide for you.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: kagent-ui-from-oauth2-proxy
+  namespace: kagent
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/component: ui
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/component: authentication-proxy
+      ports:
+        - port: 8080
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: kagent-controller-from-trusted
+  namespace: kagent
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/component: controller
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchExpressions:
+              - key: kubernetes.io/metadata.name
+                operator: In
+                values: [kagent, ate-system]

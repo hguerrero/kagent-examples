@@ -1,0 +1,30 @@
+# Passed to `helm upgrade kagent ... --reuse-values`, after __PORT__ is filled in.
+#
+# The controller trusts the bearer token oauth2-proxy forwards, and reads the
+# user from its `email` claim. oauth2-proxy signs browsers in and verifies bearer
+# tokens from API clients. It is told where Dex is in three pieces, because the
+# browser and the proxy reach Dex by different names:
+#   login-url   what the browser is redirected to (the public name)
+#   redeem-url  where the proxy exchanges the code (the in-cluster name)
+#   oidc-jwks-url / oidc-issuer-url  how it verifies tokens (keys in-cluster,
+#               the issuer string as Dex writes it into the token)
+controller:
+  auth:
+    mode: trusted-proxy
+    userIdClaim: email
+ui:
+  httpRoute:
+    enabled: false
+oauth2-proxy:
+  enabled: true
+  config:
+    existingSecret: kagent-oidc
+  extraArgs:
+    provider: oidc
+    skip-oidc-discovery: true
+    oidc-issuer-url: https://dex.kagent.localtest.me__PORT__
+    login-url: https://dex.kagent.localtest.me__PORT__/auth
+    redeem-url: http://dex.idp.svc.cluster.local:5556/token
+    oidc-jwks-url: http://dex.idp.svc.cluster.local:5556/keys
+    redirect-url: https://kagent.localtest.me__PORT__/oauth2/callback
+    upstream: http://kagent-ui:8080

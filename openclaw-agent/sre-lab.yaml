@@ -1,0 +1,120 @@
+# A namespace with one right answer to "which pods are unhealthy, and why?".
+# Three workloads are healthy and four are broken, each in a different way:
+#
+#   checkout        CrashLoopBackOff   exits at start, DATABASE_URL is not set (the reason is in the log)
+#   search          ImagePullBackOff   the image tag does not exist (the reason is in the events)
+#   report-worker   OOMKilled          buffers 200 MiB inside a 32 MiB limit (the reason is on the container status)
+#   ml-scorer       Pending            asks for 64 CPUs no node has (the reason is a FailedScheduling event)
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: sre-lab
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: payments-api, namespace: sre-lab, labels: { app: payments-api } }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: payments-api } }
+  template:
+    metadata: { labels: { app: payments-api } }
+    spec:
+      containers:
+        - name: api
+          image: hashicorp/http-echo:1.0
+          args: ["-listen=:5678", "-text=payments ok"]
+          resources: { requests: { cpu: 10m, memory: 16Mi }, limits: { memory: 32Mi } }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: orders-api, namespace: sre-lab, labels: { app: orders-api } }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: orders-api } }
+  template:
+    metadata: { labels: { app: orders-api } }
+    spec:
+      containers:
+        - name: api
+          image: hashicorp/http-echo:1.0
+          args: ["-listen=:5678", "-text=orders ok"]
+          resources: { requests: { cpu: 10m, memory: 16Mi }, limits: { memory: 32Mi } }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: catalogue, namespace: sre-lab, labels: { app: catalogue } }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: catalogue } }
+  template:
+    metadata: { labels: { app: catalogue } }
+    spec:
+      containers:
+        - name: api
+          image: hashicorp/http-echo:1.0
+          args: ["-listen=:5678", "-text=catalogue ok"]
+          resources: { requests: { cpu: 10m, memory: 16Mi }, limits: { memory: 32Mi } }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: checkout, namespace: sre-lab, labels: { app: checkout } }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: checkout } }
+  template:
+    metadata: { labels: { app: checkout } }
+    spec:
+      containers:
+        - name: checkout
+          image: busybox:1.36
+          command: ["sh", "-c"]
+          args:
+            - |
+              echo "checkout 2.8.1 starting"
+              echo "FATAL: required setting DATABASE_URL is not set; refusing to start"
+              exit 1
+          resources: { requests: { cpu: 10m, memory: 8Mi }, limits: { memory: 16Mi } }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: search, namespace: sre-lab, labels: { app: search } }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: search } }
+  template:
+    metadata: { labels: { app: search } }
+    spec:
+      containers:
+        - name: search
+          image: hashicorp/http-echo:99.99.99
+          resources: { requests: { cpu: 10m, memory: 8Mi }, limits: { memory: 16Mi } }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: report-worker, namespace: sre-lab, labels: { app: report-worker } }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: report-worker } }
+  template:
+    metadata: { labels: { app: report-worker } }
+    spec:
+      containers:
+        - name: worker
+          image: busybox:1.36
+          command: ["sh", "-c", "echo 'report-worker: building the daily report'; head -c 200m /dev/zero | tail -c 200m > /dev/null"]
+          resources: { requests: { cpu: 10m, memory: 16Mi }, limits: { memory: 32Mi } }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: ml-scorer, namespace: sre-lab, labels: { app: ml-scorer } }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: ml-scorer } }
+  template:
+    metadata: { labels: { app: ml-scorer } }
+    spec:
+      containers:
+        - name: scorer
+          image: busybox:1.36
+          command: ["sleep", "infinity"]
+          resources: { requests: { cpu: "64", memory: 64Mi } }

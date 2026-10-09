@@ -1,0 +1,41 @@
+apiVersion: api.kagent.dev/v1alpha3
+kind: Harness
+metadata:
+  name: openclaw-harness
+  namespace: kagent
+spec:
+  byo: {}
+  workload:
+    image: hguerrero0/openclaw-agent@sha256:7a3eefd32a5d9ec24911781f8857b7f6f8de34cdec9a341d7b96b082d5572d30
+    command: ["/usr/local/bin/openclaw-a2a-adapter"]       # the adapter binary baked into the image
+  env:
+    - name: OPENCLAW_EXEC_MODE
+      value: full   # run exec without asking; the actor and the egress policy are the boundary. Use "ask" to approve each command.
+  substrate:
+    workerPoolRef:
+      name: kagent-default
+    snapshotPolicy:
+      location: s3://ate-snapshots/kagent/
+---
+apiVersion: api.kagent.dev/v1alpha3
+kind: AgentTemplate
+metadata:
+  name: openclaw-template
+  namespace: kagent
+spec:
+  description: OpenClaw, running on Agent Substrate.
+  systemPrompt: |
+    You are OpenClaw running as a kagent agent. Keep answers short.
+  modelConfig:
+    name: anthropic-model-config
+---
+apiVersion: api.kagent.dev/v1alpha3
+kind: Agent
+metadata:
+  name: openclaw
+  namespace: kagent
+spec:
+  templateRef:
+    name: openclaw-template
+  harnessRef:
+    name: openclaw-harness
