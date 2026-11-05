@@ -23,7 +23,7 @@ URI="https://kagent.dev/extensions/hitl/v1"
 
 rpc() {
   curl -fsS -X POST "$API/agents/$NAMESPACE/$AGENT" \
-    -H "X-User-Id: $USER_ID" -H "A2A-Extensions: $URI" \
+    -H "X-User-Id: $USER_ID" -H "A2A-Extensions: $URI" -H "A2A-Version: 1.0" \
     -H 'Content-Type: application/json' -d "$1"
 }
 

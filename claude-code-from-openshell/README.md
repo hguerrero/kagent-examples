@@ -25,7 +25,7 @@ flowchart LR
 
 - kagent compiles the `AgentTemplate` into Claude Code configuration and runs each turn in a Substrate actor. You supply no code.
 - The Anthropic key and the GitHub token never enter the actor. The actor holds a placeholder (`kagent-credential-injected`), and the egress gateway swaps in the real value from a Kubernetes Secret on requests to `api.anthropic.com` and `api.githubcopilot.com`.
-- Egress is default-deny. The allow-list comes from the model endpoint and MCP servers named in the template, so `git clone` from github.com fails with a 403, by design.
+- Egress is default-deny. The allow-list comes from the model endpoint and MCP servers named in the template, so `git clone` from github.com fails, by design. On rc2 the host does not resolve (`Could not resolve host: github.com`). Earlier releases returned a 403 from the gateway.
 - With `requireApproval: true`, Claude pauses before each GitHub tool call. While it waits, the actor is `ACTOR_STATE_PAUSED` and holds no worker.
 
 ## Layout
@@ -42,9 +42,32 @@ flowchart LR
 
 ## Prerequisites
 
-- The base setup from the [repo README](../README.md#prerequisites): a cluster with Agent Substrate and kagent 1.x installed, plus `kubectl`, the `kagent` CLI, `kubectl-ate`, and `jq`.
+- A Kubernetes 1.37 or later cluster with about 4 GB of memory free (for a local one: `kind create cluster --name kagent --image kindest/node:v1.37.0`), plus `kubectl`, `helm`, and `jq`.
 - An [Anthropic API key](https://console.anthropic.com/).
 - For the GitHub part: a throwaway repository, a fine-grained personal access token with read and write access to only that repository, and `gh` to check the result.
+
+## Install kagent and Agent Substrate
+
+The `kagent` CLI installs everything: the CRDs, Substrate, the identity material, a development PostgreSQL, kagent, and the `kagent-default` worker pool.
+
+```bash
+curl https://raw.githubusercontent.com/kagent-dev/kagent/refs/heads/main/scripts/get-kagent | bash -s -- --version v1.0.0-rc2
+
+export OPENAI_API_KEY=unused   # the installer requires a default provider key; this example uses Anthropic
+kagent install --namespace kagent
+kubectl rollout status deployment/kagent-controller -n kagent --timeout=300s
+kubectl get workerpools -n kagent    # expect kagent-default
+```
+
+Then install the Substrate CLI plugin. Substrate `v1.0.0-rc2` has no release binary, so use the `v1.0.0-rc1` one that the kagent docs pin:
+
+```bash
+curl -fsSL -o kubectl-ate \
+  "https://github.com/kagent-dev/substrate/releases/download/v1.0.0-rc1/kubectl-ate-$(uname -s | tr '[:upper:]' '[:lower:]')-$(uname -m | sed 's/x86_64/amd64/; s/aarch64/arm64/')"
+chmod +x kubectl-ate && sudo mv kubectl-ate /usr/local/bin/
+```
+
+The [installation guide](https://kagent.dev/docs/kagent/1.x/setup/installation/) is the source of truth.
 
 ## Quickstart
 
@@ -75,7 +98,9 @@ actor: ACTOR_STATE_SUSPENDED <none>
 You asked for `substrate7702.txt`, and `cat` shows it contains just the word "substrate7702".
 actor: ACTOR_STATE_SUSPENDED <none>
 == turn 3: egress is default-deny
-It failed. The error line is: `remote: actor egress policy denied TLS destination`
+The command failed with this error:
+
+`fatal: unable to access 'https://github.com/kagent-dev/kagent.git/': Could not resolve host: github.com`
 PASS: suspend, resume, file persistence, and default-deny egress all work
 ```
 
@@ -135,32 +160,31 @@ kubectl delete secret kagent-anthropic -n kagent   # only if you created it your
 
 ## Tested with
 
-Validated end to end on 2026-10-07 on a local `kind` cluster (Kubernetes 1.37.0, arm64).
+Validated on 2026-11-05 on a fresh local `kind` cluster (Kubernetes 1.37.0, arm64, Docker with 11.6 GB), installed with `kagent install` in a single pass of about a minute.
 
 | Component | Version |
 | :--- | :--- |
-| Substrate (`substrate`, `substrate-crds` charts) | 0.3.0-alpha3 |
-| kagent (`kagent`, `kagent-crds` charts) and CLI | 1.0.0-alpha7 |
-| Worker image | `ghcr.io/kagent-dev/substrate/ateom-gvisor:v0.3.0-alpha3` |
-| Claude harness image | `ghcr.io/kagent-dev/kagent/claude-harness:1.0.0-alpha7` (`sha256:1bce31de...`, multi-arch) |
-| Claude Code (in the image) | 2.1.260 |
+| kagent (CLI, charts, controller) | 1.0.0-rc2 |
+| Substrate (installed by `kagent install`) | 1.0.0-rc2 |
+| `kubectl-ate` plugin | v1.0.0-rc1 (Substrate rc2 has no release binary) |
+| Claude harness image | `ghcr.io/kagent-dev/kagent/claude-harness:1.0.0-rc2` (`sha256:c61047f0...`, multi-arch) |
+| Claude Code (in the image) | 2.1.285 |
 | Model | `claude-sonnet-5-5` |
 
 What was run:
-- All manifests applied to the live CRDs and compiled. The agent reached `READY`.
-- `scripts/smoke-test.sh` passed: suspend after each turn, recall and file persistence on resume, and a 403 for `git clone` from github.com.
-- `scripts/push-test.sh` passed against a throwaway private repository: a branch and a file pushed through the GitHub MCP server, with one rejection and the approvals.
-- Inside a running actor, `ANTHROPIC_API_KEY` and the GitHub MCP credential were both `kagent-credential-injected` placeholders.
-- A pending approval left the actor `ACTOR_STATE_PAUSED` with no worker.
+- `kagent install` installed the CRDs, Substrate with its identity material and `egress-mitm-ca-pool`, the podcert controller, PostgreSQL, kagent, and the `kagent-default` worker pool.
+- `claude.yaml` applied and the agent reached `READY`. It needed one change for rc2: `Agent` takes `spec.template.ref`, not `spec.templateRef`.
+- `scripts/smoke-test.sh` passed: suspend after each turn, recall and file persistence on resume, and github.com blocked. The `kubectl-ate` rc1 plugin worked against Substrate rc2.
+- The gateway logged `POST api.anthropic.com/v1/messages` with status 200, so credential injection works.
+- Inside a running actor, `ANTHROPIC_API_KEY` was the `kagent-credential-injected` placeholder.
+- `github-push.yaml` passed a server-side dry run against the rc2 CRDs.
 
 Not run:
-- A wait of hours on a pending approval. Approvals were answered within seconds.
-- A clean install of Substrate and kagent. The test cluster already had them. The chart values for `providers.default: anthropic` were checked with `helm template` only.
-- A fine-grained GitHub token. The test used a broader token against a throwaway repository.
-- Approving from the kagent UI. Approvals went through `scripts/approve.sh`.
-- The alpha8 CLI and Substrate 0.4.0-alpha1.
+- `scripts/push-test.sh` and the approval flow: there was no GitHub token. Approval handling is unchanged from the alpha7 run (2026-10-07), which passed it.
+- Memory: an earlier run with 2.6 GB of Docker memory left the controller `Pending`. Plan for about 4 GB or more.
+- A wait of hours on a pending approval, approving from the kagent UI, and a fine-grained GitHub token.
 
-These are alpha releases, so the pins will drift. Check the [kagent 1.x docs](https://kagent.dev/docs/kagent/1.x/) for current versions.
+These are release candidates, so the pins can still change. Check the [kagent 1.x docs](https://kagent.dev/docs/kagent/1.x/) for current versions.
 
 ## Troubleshooting
 
