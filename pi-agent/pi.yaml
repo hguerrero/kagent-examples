@@ -7,7 +7,8 @@ metadata:
 spec:
   byo: {}
   workload:
-    image: hguerrero0/pi-agent@sha256:217e103f5fb17f32c745813a5c8809f0031877a2194ae2315b46001e210ee643
+    # Example only: the maintainer's test image. Build and push your own and replace this digest (see the README).
+    image: hguerrero0/pi-agent@sha256:f76ca835c1304c5a34c48381684e7c72e0f2adb00e9c536e53ffff9e17aee848
     command: ["/usr/local/bin/pi-a2a-adapter"]   # the adapter binary baked into the image
   env:
     - name: OPENROUTER_API_KEY
@@ -40,7 +41,8 @@ metadata:
   name: pi
   namespace: kagent
 spec:
-  templateRef:
-    name: pi-template
+  template:
+    ref:
+      name: pi-template
   harnessRef:
     name: pi-harness

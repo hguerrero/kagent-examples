@@ -6,12 +6,20 @@ Problems you may hit while running Pi on kagent 1.x and Agent Substrate, and how
 
 The CLI prints this and the session stays `RUNNING`. The gateway refused to hand your message to the actor, or the actor failed before it saved its first event. Check these in order:
 
-1. **Capacity.** Run `kubectl get workerpools -n kagent`. Every running actor holds a worker, and sessions stuck in `RUNNING` never suspend, so they keep holding it. Delete stale sessions with `kagent agent session delete <id>`, and scale the pool up if needed. Scale through Helm so the release and the cluster agree (a `kubectl scale` makes later `helm upgrade` runs fail with a field conflict):
+1. **Capacity.** Run `kubectl get workerpools -n kagent`. Every running actor holds a worker, and sessions stuck in `RUNNING` never suspend, so they keep holding it. Delete stale sessions with `kagent agent session delete <id>`, and scale the pool up if needed. Scale through the install so the release and the cluster agree (a `kubectl scale` makes later installs fail with a field conflict). `kagent install` takes no Helm flags, so the value goes in a values file:
 
    ```bash
-   helm upgrade kagent oci://ghcr.io/kagent-dev/kagent/helm/kagent \
-     --version 1.0.0-alpha7 --namespace kagent --reuse-values \
-     --set substrateWorkerPool.replicas=3
+   cat > kagent-values.yaml <<EOF
+   substrateWorkerPool:
+     replicas: 3
+   EOF
+   cat > kagent-config.yaml <<EOF
+   install:
+     kagent:
+       valuesFiles: [kagent-values.yaml]
+   EOF
+   export OPENAI_API_KEY=<the provider key you installed kagent with>
+   kagent --config kagent-config.yaml install --namespace kagent
    ```
 
 2. **The adapter's first event.** kagent's ADK wrapper emits the task's first event itself. An adapter that also emits a submitted task produces a conflicting write, and the dispatch is revoked. The adapter in `adapter/main.go` does not emit one, so this only applies if you change it.
