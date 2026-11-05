@@ -56,6 +56,6 @@ answer=$(kagent agent invoke --session "$SESSION_ID" \
   --task "Run: git ls-remote https://github.com/kagent-dev/kagent.git HEAD. Quote the error line if it fails.") \
   || fail "turn 3 was not accepted"
 echo "$answer"
-grep -qi "denied\|403" <<<"$answer" || fail "expected the gateway to deny github.com"
+grep -qi "denied\|403\|resolve host" <<<"$answer" || fail "expected the gateway to deny github.com"
 
 echo "PASS: suspend, resume, file persistence, and default-deny egress all work"

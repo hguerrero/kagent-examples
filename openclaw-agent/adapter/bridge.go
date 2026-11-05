@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -20,6 +21,7 @@ import (
 const (
 	gatewayReadyTimeout = 120 * time.Second
 	acpStartTimeout     = 60 * time.Second
+	recoveryTimeout     = 120 * time.Second
 )
 
 // openclawBridge owns the two OpenClaw processes in the actor: the gateway,
@@ -98,6 +100,24 @@ func (b *openclawBridge) startGatewayLocked(ctx context.Context) error {
 				b.logger.Info("OpenClaw gateway is ready")
 				return nil
 			}
+		}
+	}
+}
+
+// awaitRecovery waits until the gateway has finished re-running any session that
+// was interrupted when the last gateway died. A prompt sent meanwhile is steered
+// into that run and ends with no output. It gives up after recoveryTimeout, because
+// a stuck recovery must not hold the turn forever.
+func (b *openclawBridge) awaitRecovery(ctx context.Context) {
+	deadline := time.After(recoveryTimeout)
+	for b.errs.recoveryPending() {
+		select {
+		case <-ctx.Done():
+			return
+		case <-deadline:
+			b.logger.Warn("OpenClaw was still recovering an interrupted session; continuing", "after", recoveryTimeout)
+			return
+		case <-time.After(250 * time.Millisecond):
 		}
 	}
 }
@@ -185,11 +205,28 @@ type errorTap struct {
 	buf  bytes.Buffer
 	at   time.Time
 	text string
+
+	// OpenClaw re-runs a session that was running when its gateway died. The
+	// tap follows that recovery from the log: whether it began at all, how many
+	// runs it started, and how many have ended. A gateway with nothing to
+	// recover logs none of this.
+	recoverySeen    bool
+	recoveryKnown   bool
+	recoveryStarted int
+	recoveryEnded   int
 }
 
 // runError matches the line OpenClaw logs when a run ends in an error, such as
 // "... isError=true model=... error=<message> rawError=<provider body>".
 var runError = regexp.MustCompile(`isError=true\b.*? error=(.+?)(?: rawError=|$)`)
+
+// recoveryStart is logged once at start-up, with the number of runs recovery began.
+// recoveryEnd is logged when each of those runs ends.
+var (
+	recoveryAny   = regexp.MustCompile(`\[main-session-restart-recovery\]`)
+	recoveryStart = regexp.MustCompile(`restart recovery startup complete: started=(\d+)`)
+	recoveryEnd   = regexp.MustCompile(`restart recovery terminal:`)
+)
 
 func (e *errorTap) Write(p []byte) (int, error) {
 	e.mu.Lock()
@@ -201,11 +238,33 @@ func (e *errorTap) Write(p []byte) (int, error) {
 			e.buf.Write(line) // keep the partial line for the next write
 			break
 		}
-		if m := runError.FindSubmatch(bytes.TrimRight(line, "\r\n")); m != nil {
+		line = bytes.TrimRight(line, "\r\n")
+		if m := runError.FindSubmatch(line); m != nil {
 			e.at, e.text = time.Now(), string(m[1])
+		}
+		if recoveryAny.Match(line) {
+			e.recoverySeen = true
+		}
+		if m := recoveryStart.FindSubmatch(line); m != nil {
+			e.recoveryKnown = true
+			e.recoveryStarted, _ = strconv.Atoi(string(m[1]))
+		}
+		if recoveryEnd.Match(line) {
+			e.recoveryEnded++
 		}
 	}
 	return len(p), nil
+}
+
+// recoveryPending reports whether the gateway began a start-up recovery that has
+// not finished. It is false when the gateway logged no recovery at all.
+func (e *errorTap) recoveryPending() bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if !e.recoverySeen {
+		return false
+	}
+	return !e.recoveryKnown || e.recoveryEnded < e.recoveryStarted
 }
 
 func (e *errorTap) since(t time.Time) string {

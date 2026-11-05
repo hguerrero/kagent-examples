@@ -1,26 +1,28 @@
 package main
 
 import (
-	"encoding/json"
 	"strings"
 	"testing"
 
-	"github.com/kagent-dev/kagent/go/api/adk"
+	"github.com/kagent-dev/kagent/go/adk/pkg/config"
+	configv1 "github.com/kagent-dev/kagent/go/api/gen/kagent/config/v1"
 )
 
 func env(vars map[string]string) func(string) string { return func(k string) string { return vars[k] } }
 
-func parse(t *testing.T, raw string) *adk.AgentConfig {
+// parse decodes an agent the way the adapter does at start-up: as part of the
+// ADKConfig kagent compiles, validated by the same loader.
+func parse(t *testing.T, raw string) *configv1.ADKAgentConfig {
 	t.Helper()
-	var cfg adk.AgentConfig
-	if err := json.Unmarshal([]byte(raw), &cfg); err != nil {
+	var cfg configv1.ADKConfig
+	if err := config.Unmarshal([]byte(`{"agent":`+raw+`}`), &cfg); err != nil {
 		t.Fatal(err)
 	}
-	return &cfg
+	return cfg.GetAgent()
 }
 
 func TestAnthropicOnItsOwnEndpointNeedsNoProviderBlock(t *testing.T) {
-	cfg := parse(t, `{"model":{"type":"anthropic","model":"claude-sonnet-5-5"},"instruction":"x"}`)
+	cfg := parse(t, `{"model":{"model":"claude-sonnet-5-5","anthropic":{}},"instruction":"x"}`)
 	doc, err := buildConfig(cfg, "/data/workspace", "", env(nil))
 	if err != nil {
 		t.Fatal(err)
@@ -47,7 +49,7 @@ func TestAnthropicOnItsOwnEndpointNeedsNoProviderBlock(t *testing.T) {
 }
 
 func TestCustomBaseURLGetsAProviderBlockWithMaxTokens(t *testing.T) {
-	cfg := parse(t, `{"model":{"type":"openai","model":"gpt-x","base_url":"https://openrouter.ai/api/v1"}}`)
+	cfg := parse(t, `{"model":{"model":"gpt-x","openai":{"base_url":"https://openrouter.ai/api/v1"}}}`)
 	doc, err := buildConfig(cfg, "/w", "ask", env(map[string]string{"OPENAI_API_KEY": "kagent-credential-injected"}))
 	if err != nil {
 		t.Fatal(err)
@@ -66,7 +68,7 @@ func TestCustomBaseURLGetsAProviderBlockWithMaxTokens(t *testing.T) {
 
 func TestMCPServersBecomeTheRegistry(t *testing.T) {
 	cfg := parse(t, `{
-		"model":{"type":"anthropic","model":"m"},
+		"model":{"model":"m","anthropic":{}},
 		"http_tools":[
 			{"params":{"url":"http://tools-gateway.agentgateway-system.svc.cluster.local/mcp","headers":{"Authorization":"__KAGENT_ENV[KAGENT_CREDENTIAL_AB]__","X-Static":"1"}},"tools":["k8s_get_resources","k8s_get_events"]},
 			{"params":{"url":"http://tools-gateway.other.svc/mcp","headers":{}}}
@@ -95,11 +97,11 @@ func TestMCPServersBecomeTheRegistry(t *testing.T) {
 func TestUnsupportedInputsAreRefusedLoudly(t *testing.T) {
 	for name, tc := range map[string]struct{ raw, mode, want string }{
 		"no model":       {`{}`, "", "needs a modelConfig"},
-		"bedrock":        {`{"model":{"type":"bedrock","model":"m"}}`, "", "not supported"},
-		"bad exec mode":  {`{"model":{"type":"anthropic","model":"m"}}`, "yolo", "OPENCLAW_EXEC_MODE"},
-		"mcp approval":   {`{"model":{"type":"anthropic","model":"m"},"http_tools":[{"params":{"url":"http://x/mcp"},"require_approval":true}]}`, "", "requireApproval"},
-		"missing secret": {`{"model":{"type":"anthropic","model":"m"},"http_tools":[{"params":{"url":"http://x/mcp","headers":{"A":"__KAGENT_ENV[NOPE]__"}}}]}`, "", "NOPE"},
-		"stdio tool":     {`{"model":{"type":"anthropic","model":"m"},"stdio_tools":[{"command":"x"}]}`, "", "not supported"},
+		"bedrock":        {`{"model":{"model":"m","bedrock":{"region":"us-east-1"}}}`, "", "not supported"},
+		"bad exec mode":  {`{"model":{"model":"m","anthropic":{}}}`, "yolo", "OPENCLAW_EXEC_MODE"},
+		"mcp approval":   {`{"model":{"model":"m","anthropic":{}},"http_tools":[{"params":{"url":"http://x/mcp"},"require_approval":true}]}`, "", "requireApproval"},
+		"missing secret": {`{"model":{"model":"m","anthropic":{}},"http_tools":[{"params":{"url":"http://x/mcp","headers":{"A":"__KAGENT_ENV[NOPE]__"}}}]}`, "", "NOPE"},
+		"stdio tool":     {`{"model":{"model":"m","anthropic":{}},"stdio_tools":[{"command":"x"}]}`, "", "not supported"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			_, err := buildConfig(parse(t, tc.raw), "/w", tc.mode, env(nil))
@@ -111,10 +113,10 @@ func TestUnsupportedInputsAreRefusedLoudly(t *testing.T) {
 }
 
 func TestInstructionsAreMarkedAsManaged(t *testing.T) {
-	if got := instructions(&adk.AgentConfig{}); got != "" {
+	if got := instructions(&configv1.ADKAgentConfig{}); got != "" {
 		t.Errorf("no instruction should write no file, got %q", got)
 	}
-	got := instructions(&adk.AgentConfig{Instruction: "  Be brief.  "})
+	got := instructions(&configv1.ADKAgentConfig{Instruction: "  Be brief.  "})
 	if !strings.Contains(got, "Managed by kagent") || !strings.HasSuffix(got, "Be brief.\n") {
 		t.Errorf("instructions = %q", got)
 	}

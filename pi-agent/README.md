@@ -4,6 +4,10 @@ Run the [Pi coding agent](https://github.com/earendil-works/pi) on [kagent](http
 
 This example is a migration of NVIDIA OpenShell's [Run Pi with OpenRouter](https://docs.nvidia.com/openshell/latest/tutorials/run-pi-with-openrouter) tutorial: the same Pi image, now behind a small adapter, with kagent resources in place of sandbox flags. It is part of [kagent-examples](../README.md). For Claude Code, which kagent supports out of the box and needs no adapter, see [`claude-code-from-openshell`](../claude-code-from-openshell/).
 
+> **Build your own image.** `pi.yaml` and `sandboxtemplate.yaml` point at `hguerrero0/pi-agent:1.0.0-rc2`, pinned by digest. That is the maintainer's image. It is there as an example of the reference format and for the maintainer's own tests that check these instructions, and it can change or disappear without notice. Build the image from this repo, push it to a registry you control, and put its digest in the manifest before you apply it. See [Build and push your image](#build-and-push-your-image).
+
+> **Status on kagent 1.0.0-rc2.** The adapter is ported and runs on rc2 (see [Tested with](#tested-with)). The alpha7 image that earlier revisions of this example used stops at start-up on rc2.
+
 ## What maps to what
 
 | OpenShell tutorial | This example |
@@ -46,8 +50,29 @@ flowchart LR
 ## Prerequisites
 
 - The base setup from the [repo README](../README.md#prerequisites): a cluster with Agent Substrate and kagent 1.x installed, plus `kubectl`, the `kagent` CLI, `kubectl-ate`, and `jq`.
-- Docker, if you build your own image.
+- Docker and a registry you can push to. You build and push the adapter image yourself: see [Build and push your image](#build-and-push-your-image).
 - An [OpenRouter API key](https://openrouter.ai/keys). The default model is a free one, so no credits are needed.
+
+## Build and push your image
+
+You need Docker and a registry you can push to, such as Docker Hub or GHCR. The build, the push, and the digest below are required steps. The manifests carry the maintainer's `hguerrero0/pi-agent` digest only as an example of the format. Replace it with yours.
+
+```bash
+docker build -t <registry>/pi-agent:0.1 -f Dockerfile.pi .
+docker push <registry>/pi-agent:0.1
+docker inspect --format='{{index .RepoDigests 0}}' <registry>/pi-agent:0.1
+```
+
+Put the printed `<registry>/pi-agent@sha256:...` reference in the `workload.image` field of `pi.yaml` and `sandboxtemplate.yaml`. Substrate pins images by digest, so a tag or a local image will not work. The build needs network access to fetch the Go modules, and you can pin Pi with `--build-arg PI_VERSION=<version>` (it defaults to `latest`).
+
+Check the image before you push:
+
+```bash
+docker run --rm --entrypoint pi <registry>/pi-agent:0.1 --version
+docker run --rm --entrypoint ls <registry>/pi-agent:0.1 -l /usr/local/bin/pi-a2a-adapter
+```
+
+The adapter refuses to start outside kagent because it needs the agent card that kagent supplies. That is expected.
 
 ## Quickstart
 
@@ -86,27 +111,6 @@ kagent agent invoke --session $SESSION_ID --task "Create hello.txt with a one-li
 kagent agent session delete $SESSION_ID
 ```
 
-### Use your own image
-
-`pi.yaml` points at a prebuilt, public, multi-arch image (`linux/amd64` and `linux/arm64`), `hguerrero0/pi-agent`. It saves you a build, but building your own means you run exactly what is in this repo, and you control updates:
-
-```bash
-docker build -t <registry>/pi-agent:0.1 -f Dockerfile.pi .
-docker push <registry>/pi-agent:0.1
-docker inspect --format='{{index .RepoDigests 0}}' <registry>/pi-agent:0.1
-```
-
-Put the printed `<registry>/pi-agent@sha256:...` reference in the `workload.image` field of `pi.yaml` and `sandboxtemplate.yaml`. Substrate pins images by digest, so a tag or a local image will not work. The build needs network access to fetch the Go modules, and you can pin Pi with `--build-arg PI_VERSION=<version>` (it defaults to `latest`).
-
-Check the image before you push:
-
-```bash
-docker run --rm --entrypoint pi <registry>/pi-agent:0.1 --version
-docker run --rm --entrypoint ls <registry>/pi-agent:0.1 -l /usr/local/bin/pi-a2a-adapter
-```
-
-The adapter refuses to start outside kagent because it needs the agent card that kagent supplies. That is expected.
-
 ## Configuration
 
 | Setting | Where | Notes |
@@ -120,15 +124,24 @@ The adapter refuses to start outside kagent because it needs the agent card that
 
 `sandboxtemplate.yaml` defines a disposable standalone sandbox that reuses the Pi image. It is for running commands and moving files, not for agents: the gateway denies all outbound connections from a standalone sandbox.
 
-Enable standalone sandboxes first by setting the guest image digest, or the template fails with `PreparationFailed`. The digest below is for kagent `1.0.0-alpha7`:
+Enable standalone sandboxes first by setting the guest image, or the template fails with `PreparationFailed`. `kagent install` takes no Helm flags, so the value goes in a values file that a CLI config points to. The image below is the kagent `1.0.0-rc2` sandbox guest. Use the same provider key you installed kagent with:
 
 ```bash
-helm upgrade kagent oci://ghcr.io/kagent-dev/kagent/helm/kagent \
-  --version 1.0.0-alpha7 --namespace kagent --reuse-values \
-  --set controller.sandbox.guestImage.digest=sha256:1821780ef01958f63cb9a1a1d9a175f7e386e7c72859dd29ab86d8644a47d2d4
+cat > kagent-values.yaml <<EOF
+config:
+  sandboxes:
+    guestImage: ghcr.io/kagent-dev/kagent/sandbox-guest@sha256:ea943e3adc3531b0417bd5508e7a91119b793c4430bad170d93fc7dc0adf5740
+EOF
+cat > kagent-config.yaml <<EOF
+install:
+  kagent:
+    valuesFiles: [kagent-values.yaml]
+EOF
+export OPENAI_API_KEY=<the provider key you installed kagent with>
+kagent --config kagent-config.yaml install --namespace kagent
 ```
 
-If you scaled the worker pool with `kubectl scale`, this fails with a field conflict. Add `--set substrateWorkerPool.replicas=<current count>`. Then:
+Then:
 
 ```bash
 kubectl apply -f sandboxtemplate.yaml
@@ -167,27 +180,30 @@ Delete any sessions you created with `kagent agent session delete <id>`, because
 
 ## Tested with
 
-Validated end to end on 2026-10-06 on a local `kind` cluster (Kubernetes 1.37.0, arm64). The multi-arch image in `pi.yaml` was re-tested on the same cluster on 2026-10-07.
+Validated on 2026-11-05 on a local `kind` cluster (Kubernetes 1.37.0, arm64, Docker with 11.6 GB), installed with `kagent install`. The image is the maintainer's test image, `hguerrero0/pi-agent@sha256:f76ca835...` (`1.0.0-rc2`, multi-arch), built from this repo and pulled from Docker Hub with the digest in `pi.yaml`. An image you build from the same source is what these instructions expect you to run.
 
 | Component | Version |
 | :--- | :--- |
-| Substrate (`substrate`, `substrate-crds` charts) | 0.3.0-alpha3 |
-| kagent (`kagent`, `kagent-crds` charts) and CLI | 1.0.0-alpha7 |
-| Worker image | `ghcr.io/kagent-dev/substrate/ateom-gvisor:v0.3.0-alpha3` |
-| kagent Go ADK (adapter dependency) | commit `542e0a7a82f0f32d09c398f9c56319a3f617c93a` (`v1.0.0-alpha7`) |
-| Go | 1.27.1 |
+| kagent (CLI, charts, controller) | 1.0.0-rc2 |
+| Substrate (installed by `kagent install`) | 1.0.0-rc2 |
+| kagent Go ADK (adapter dependency) | commit `4a5c758598a983c47ea14ea1757b191db8423884` (`v1.0.0-rc2`) |
+| Go | 1.27.3 |
 | Pi | 1.0.4 (`@earendil-works/pi-coding-agent`, `latest` at build time) |
 | Node | 24 (`node:24-bookworm-slim`) |
+| Model | `claude-sonnet-5-5` on Anthropic, see below |
 
 What was run:
 - The adapter builds and passes `go vet`, and the `go mod` commands in the Notes section reproduce `go.mod` and `go.sum` exactly.
-- The Dockerfile builds and passes the image checks above.
-- All manifests pass a server-side dry run against the kagent CRDs.
-- Nine turns across three sessions completed, with each resume restoring the earlier conversation.
-- OpenRouter calls succeeded through the gateway with the placeholder key, with no egress denials once `PI_OFFLINE=1` was set.
+- The Dockerfile builds for both platforms, and the agent reached `READY` on rc2 with the published image.
+- `scripts/smoke-test.sh` passed: a turn that wrote a file, a suspend, and a resume that recalled the file and the earlier conversation.
 - The standalone sandbox flow ran end to end: create, exec, upload, download, suspend, resume, and delete.
+- `pi.yaml` and `sandboxtemplate.yaml` pass a server-side dry run against the rc2 CRDs, after `Agent` moved to `spec.template.ref`.
 
-These are alpha releases, so the pins will drift. Check the [kagent 1.x docs](https://kagent.dev/docs/kagent/1.x/) for current versions. The alpha8 CLI and Substrate 0.4.0-alpha1 were not tested.
+Not run:
+- OpenRouter. There was no OpenRouter key, so the smoke test ran with Anthropic instead: `PI_PROVIDER=anthropic`, `PI_MODEL=claude-sonnet-5-5`, an `ANTHROPIC_API_KEY` placeholder, and the Anthropic `ModelConfig` from the [`openclaw-agent`](../openclaw-agent/) example. The adapter code is the same for both providers, and only the environment and the `ModelConfig` differ. The OpenRouter path was last run on alpha7.
+- The amd64 variant. It is built from the same source and published in the same image, but the cluster was arm64.
+
+The earlier run on kagent 1.0.0-alpha7 and Substrate 0.3.0-alpha3 (2026-10-06 and 2026-10-07) used OpenRouter, ran nine turns across three sessions, and saw no egress denials once `PI_OFFLINE=1` was set. These are release candidates, so the pins can still change. Check the [kagent 1.x docs](https://kagent.dev/docs/kagent/1.x/) for current versions.
 
 ## Troubleshooting
 
@@ -197,17 +213,18 @@ See [TROUBLESHOOTING.md](TROUBLESHOOTING.md) for the `input was not accepted` er
 
 - The actor runs as root (uid 0) inside its gVisor sandbox, so the `USER node` line in `Dockerfile.pi` does not decide file ownership at run time. The durable `/data` volume is empty and root-owned on first start, and the adapter creates `/data/workspace` and `/data/pi-agent/sessions` itself.
 - The first cluster run used an earlier single-arch (arm64) build of the image, from an earlier revision of `Dockerfile.pi` that also created `/data/workspace` in the image. That makes no difference at run time, because the durable volume is mounted over `/data` and hides anything the image put there. The multi-arch image now in `pi.yaml` was then rolled out and passed `scripts/smoke-test.sh` on the same arm64 cluster. Its amd64 variant was only checked by starting `pi --version` under emulation. It has not run on an amd64 cluster.
-- To recreate the adapter's module (Go 1.27 or later), pin the kagent ADK to the commit behind `v1.0.0-alpha7`, and repeat the `replace` that kagent uses:
+- To recreate the adapter's module (Go 1.27.3 or later), pin the kagent ADK to the commit behind `v1.0.0-rc2`, and repeat the `replace` that kagent uses:
 
   ```bash
   cd adapter
   go mod init example.com/pi-a2a-adapter
-  go get github.com/kagent-dev/kagent/go@542e0a7a82f0f32d09c398f9c56319a3f617c93a
-  go mod edit -replace github.com/agent-substrate/substrate=github.com/kagent-dev/substrate@v0.3.0-alpha3
+  go get github.com/kagent-dev/kagent/go@4a5c758598a983c47ea14ea1757b191db8423884
+  go mod edit -replace go.ate.dev/substrate=github.com/kagent-dev/substrate@v1.0.0-rc2
   go mod tidy
   ```
 
-- The adapter uses the same pattern as kagent's own Claude Code harness. Its dependencies are pinned to the `v1.0.0-alpha7` commit, and `go.mod` repeats the `replace` for the Substrate API types because Go ignores `replace` directives in dependencies.
+- The adapter uses the same pattern as kagent's own Claude Code harness. Its dependencies are pinned to the `v1.0.0-rc2` commit, and `go.mod` repeats the `replace` for the Substrate API types because Go ignores `replace` directives in dependencies. The Substrate module is `go.ate.dev/substrate` in rc2, and it was `github.com/agent-substrate/substrate` in alpha7.
+- **What changed in the adapter for rc2.** kagent no longer reads its control-plane URL from the environment. The adapter decodes the compiled configuration in `KAGENT_CONFIG_JSON` with kagent's own loader (`config.Unmarshal` and `config.ProcessConfig`), passes `ControlPlaneURL` and `MaxContentLength` to `app.New`, and takes the log level from the same document. The alpha7 adapter failed on rc2 with `ControllerClient or KAGENT_API_URL is required`.
 
 ## License
 

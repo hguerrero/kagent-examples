@@ -28,12 +28,18 @@ type bridge interface {
 	reset(c *acpClient)
 	// modelError returns the gateway's last run error logged since the mark.
 	modelError(since time.Time) string
+	// awaitRecovery waits for OpenClaw to finish re-running a session that was
+	// interrupted when the previous gateway died.
+	awaitRecovery(ctx context.Context)
 }
 
 // runner implements kagent's harness runtime.Runner on top of OpenClaw's ACP bridge.
 type runner struct {
 	logger *slog.Logger
 	bridge bridge
+	// journal is where a parked approval is recorded, so it survives a suspend.
+	// Empty turns the journal off.
+	journal string
 
 	mu      sync.Mutex
 	started bool // continuation already reported to kagent
@@ -47,6 +53,11 @@ type turnState struct {
 	began     time.Time
 	tools     map[string]string // tool call ID -> tool name
 	produced  bool              // any text or tool activity
+	taskID    string
+	contextID string
+	// allow is a command the user already approved. OpenClaw's next request for
+	// exactly that command is answered without asking again.
+	allow string
 }
 
 func (r *runner) Run(ctx context.Context, turn runtime.Turn, sink runtime.EventSink) (runtime.Outcome, error) {
@@ -74,6 +85,7 @@ func (r *runner) Run(ctx context.Context, turn runtime.Turn, sink runtime.EventS
 	return r.pump(ctx, &turnState{
 		client: client, sessionID: sessionID, promptID: fmt.Sprint(id),
 		began: time.Now(), tools: map[string]string{},
+		taskID: turn.TaskID, contextID: turn.ContextID,
 	}, sink)
 }
 
@@ -105,6 +117,24 @@ func (r *runner) pump(ctx context.Context, t *turnState, sink runtime.EventSink)
 				_ = t.client.reply(m.ID, map[string]any{"outcome": map[string]any{"outcome": "cancelled"}})
 				return failure("OpenClaw sent a permission request the adapter could not read: " + err.Error()), nil
 			}
+			if t.allow != "" && pending.command == t.allow {
+				// The user approved this command before the actor was suspended.
+				t.allow = ""
+				if option, ok := pending.choose(true); ok {
+					if err := t.client.reply(m.ID, map[string]any{"outcome": map[string]any{"outcome": "selected", "optionId": option}}); err != nil {
+						r.bridge.reset(t.client)
+						return failure("could not answer OpenClaw: " + err.Error()), nil
+					}
+					continue
+				}
+			}
+			// Park the turn. The actor suspends while it waits for the answer and
+			// keeps only /data, so end the OpenClaw run now: OpenClaw cannot carry a
+			// permission request across a restart, and it re-runs on its own any
+			// session that was still running when its gateway died.
+			r.park(pending)
+			_ = t.client.reply(m.ID, map[string]any{"outcome": map[string]any{"outcome": "cancelled"}})
+			r.cancel(t)
 			return runtime.Outcome{Pending: pending}, nil
 		case len(m.ID) > 0 && m.Method != "":
 			// Any other request from the bridge, such as file or terminal access,
@@ -245,14 +275,21 @@ func failure(msg string) runtime.Outcome {
 	return runtime.Outcome{Failure: &runtime.Failure{Message: msg}}
 }
 
-// pendingTurn is a prompt parked on one of OpenClaw's exec approvals. The
-// bridge process stays alive while it waits, and kagent either answers or cancels.
+// pendingTurn is a prompt parked on one of OpenClaw's exec approvals. It holds
+// no OpenClaw process: the run ended when the turn parked, because an actor
+// suspends while it waits and keeps only /data. Resume replays the decision to
+// the same OpenClaw session, which a restore rebuilds from the journal.
 type pendingTurn struct {
-	r       *runner
-	t       *turnState
+	r         *runner
+	taskID    string
+	contextID string
+	command   string // the exec command being approved, when the request has one
+	request   *runtime.ApprovalRequest
+
+	// reqID and options belong to the permission request this was built from,
+	// and are used only to answer it if OpenClaw asks again.
 	reqID   json.RawMessage
 	options []permissionOption
-	request *runtime.ApprovalRequest
 }
 
 type permissionOption struct {
@@ -289,11 +326,12 @@ func newPending(r *runner, t *turnState, m message) (*pendingTurn, error) {
 		id = tc.ToolCallID
 	}
 	hint := "OpenClaw asks to run: " + tc.Title
-	if command, ok := tc.RawInput["command"].(string); ok && command != "" {
+	command, _ := tc.RawInput["command"].(string)
+	if command != "" {
 		hint = "OpenClaw asks to run the command: " + command // the title also carries timing options
 	}
 	return &pendingTurn{
-		r: r, t: t, reqID: m.ID, options: p.Options,
+		r: r, taskID: t.taskID, contextID: t.contextID, command: command, reqID: m.ID, options: p.Options,
 		request: &runtime.ApprovalRequest{ID: id, CallID: tc.ToolCallID, Name: name, Args: tc.RawInput, Hint: hint},
 	}, nil
 }
@@ -320,20 +358,13 @@ func (p *pendingTurn) Resume(ctx context.Context, response runtime.InputResponse
 	if !ok {
 		return runtime.Outcome{}, fmt.Errorf("OpenClaw only asks for approvals, got %T", response)
 	}
-	option, ok := p.choose(decision.Approved)
-	if !ok {
-		_ = p.Cancel(ctx)
-		return runtime.Outcome{}, fmt.Errorf("OpenClaw offered no option that matches the decision")
-	}
-	if err := p.t.client.reply(p.reqID, map[string]any{"outcome": map[string]any{"outcome": "selected", "optionId": option}}); err != nil {
-		p.r.bridge.reset(p.t.client)
-		return failure("could not answer OpenClaw: " + err.Error()), nil
-	}
-	return p.r.pump(ctx, p.t, sink)
+	return p.resume(ctx, decision, sink)
 }
 
-func (p *pendingTurn) Cancel(context.Context) error {
-	_ = p.t.client.reply(p.reqID, map[string]any{"outcome": map[string]any{"outcome": "cancelled"}})
-	p.r.cancel(p.t)
+// Cancel drops the parked approval. Nothing runs in OpenClaw for it, so there
+// is nothing to stop, and OpenClaw's ACP bridge reports no token usage, so there
+// is no ModelCall to emit.
+func (p *pendingTurn) Cancel(context.Context, runtime.ModelCallSink) error {
+	p.r.clearJournal()
 	return nil
 }

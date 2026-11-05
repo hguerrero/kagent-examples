@@ -13,6 +13,7 @@ package main
 
 import (
 	"bufio"
+	"cmp"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -30,12 +31,15 @@ import (
 	a2atype "github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/a2aproject/a2a-go/v2/a2asrv"
 	"github.com/kagent-dev/kagent/go/adk/pkg/app"
+	"github.com/kagent-dev/kagent/go/adk/pkg/config"
 	apia2a "github.com/kagent-dev/kagent/go/api/a2a"
+	configv1 "github.com/kagent-dev/kagent/go/api/gen/kagent/config/v1"
 	"github.com/kagent-dev/kagent/go/pkg/logging"
 )
 
 const (
 	agentCardEnv = "KAGENT_AGENT_CARD_JSON" // rendered by kagent from the AgentTemplate
+	configEnv    = "KAGENT_CONFIG_JSON"     // the configuration kagent compiled for this actor
 	dataDir      = "/data"                  // durable directory in the actor
 	privatePort  = "80"                     // fixed by the kagent A2A contract
 	piStartup    = 90 * time.Second         // time allowed for Pi to answer its first command
@@ -326,7 +330,16 @@ func (e *piExecutor) Cancel(_ context.Context, ec *a2asrv.ExecutorContext) iter.
 }
 
 func main() {
-	logger, err := logging.NewFromEnv(os.Stderr)
+	// kagent compiles the runtime settings (the control-plane URL, the log
+	// level) into KAGENT_CONFIG_JSON and passes them in the environment.
+	var compiled configv1.ADKConfig
+	if err := config.Unmarshal([]byte(os.Getenv(configEnv)), &compiled); err != nil {
+		fmt.Fprintln(os.Stderr, "a valid kagent configuration is required in "+configEnv+":", err)
+		os.Exit(1)
+	}
+	runtime := config.ProcessConfig(&compiled)
+
+	logger, err := logging.New(os.Stderr, cmp.Or(runtime.LogLevel, "info"))
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
@@ -340,10 +353,12 @@ func main() {
 	}
 
 	application, err := app.New(app.AppConfig{
-		AgentCard: card,
-		Port:      privatePort,
-		AppName:   card.Name,
-		Logger:    logger,
+		AgentCard:        card,
+		Port:             privatePort,
+		AppName:          card.Name,
+		Logger:           logger,
+		ControlPlaneURL:  runtime.ControlPlaneUrl,
+		MaxContentLength: runtime.MaxContentLength,
 	}, &piExecutor{logger: logger})
 	if err != nil {
 		logger.Error("could not construct the A2A app", "error", err)

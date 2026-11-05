@@ -9,6 +9,7 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -21,7 +22,8 @@ import (
 
 	a2atype "github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/kagent-dev/kagent/go/adk/pkg/app"
-	"github.com/kagent-dev/kagent/go/api/adk"
+	"github.com/kagent-dev/kagent/go/adk/pkg/config"
+	configv1 "github.com/kagent-dev/kagent/go/api/gen/kagent/config/v1"
 	runtimea2a "github.com/kagent-dev/kagent/go/harness/runtime/a2a"
 	"github.com/kagent-dev/kagent/go/harness/runtime/continuation"
 	"github.com/kagent-dev/kagent/go/pkg/logging"
@@ -38,25 +40,32 @@ const (
 var continuationPattern = regexp.MustCompile(`^agent:[a-z0-9_-]+:[a-z0-9_-]+$`)
 
 func main() {
-	logger, err := logging.NewFromEnv(os.Stderr)
+	// kagent compiles the runtime settings and the agent into KAGENT_CONFIG_JSON.
+	var compiled configv1.ADKConfig
+	if err := config.Unmarshal([]byte(os.Getenv(configEnv)), &compiled); err != nil {
+		fmt.Fprintf(os.Stderr, "a valid agent configuration is required in %s: %v\n", configEnv, err)
+		os.Exit(1)
+	}
+	runtimeCfg := config.ProcessConfig(&compiled)
+	logger, err := logging.New(os.Stderr, cmp.Or(runtimeCfg.LogLevel, "info"))
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-	if err := run(context.Background(), logger); err != nil {
+	if err := run(context.Background(), logger, &compiled, runtimeCfg); err != nil {
 		logger.Error("openclaw adapter stopped", "error", err)
 		os.Exit(1)
 	}
 }
 
-func run(ctx context.Context, logger *slog.Logger) error {
+func run(ctx context.Context, logger *slog.Logger, compiled *configv1.ADKConfig, runtimeCfg *configv1.ADKRuntimeConfig) error {
 	var card a2atype.AgentCard
 	if err := json.Unmarshal([]byte(os.Getenv(agentCardEnv)), &card); err != nil || strings.TrimSpace(card.Name) == "" {
 		return fmt.Errorf("a valid agent card is required in %s: %v", agentCardEnv, err)
 	}
-	var cfg adk.AgentConfig
-	if err := json.Unmarshal([]byte(os.Getenv(configEnv)), &cfg); err != nil {
-		return fmt.Errorf("a valid agent configuration is required in %s: %w", configEnv, err)
+	cfg := compiled.GetAgent()
+	if cfg == nil {
+		cfg = &configv1.ADKAgentConfig{}
 	}
 
 	workspace := filepath.Join(dataDir, "workspace")
@@ -71,7 +80,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		}
 	}
 
-	doc, err := buildConfig(&cfg, workspace, os.Getenv(execModeEnv), os.Getenv)
+	doc, err := buildConfig(cfg, workspace, os.Getenv(execModeEnv), os.Getenv)
 	if err != nil {
 		return err
 	}
@@ -83,7 +92,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	if err := os.WriteFile(configPath, raw, 0o600); err != nil {
 		return err
 	}
-	if text := instructions(&cfg); text != "" {
+	if text := instructions(cfg); text != "" {
 		if err := os.WriteFile(filepath.Join(workspace, "AGENTS.md"), []byte(text), 0o644); err != nil {
 			return err
 		}
@@ -109,15 +118,17 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	executor, err := runtimea2a.New(&runner{logger: bridge.logger, bridge: bridge}, store, tracing.RuntimeTelemetry{})
+	executor, err := runtimea2a.New(&runner{logger: bridge.logger, bridge: bridge, journal: filepath.Join(dataDir, "adapter", "pending.json")}, store, tracing.RuntimeTelemetry{})
 	if err != nil {
 		return err
 	}
 	application, err := app.New(app.AppConfig{
-		AgentCard: card,
-		Port:      privatePort,
-		AppName:   card.Name,
-		Logger:    bridge.logger,
+		AgentCard:        card,
+		Port:             privatePort,
+		AppName:          card.Name,
+		Logger:           bridge.logger,
+		ControlPlaneURL:  runtimeCfg.ControlPlaneUrl,
+		MaxContentLength: runtimeCfg.MaxContentLength,
 	}, executor)
 	if err != nil {
 		return fmt.Errorf("construct the A2A app: %w", err)

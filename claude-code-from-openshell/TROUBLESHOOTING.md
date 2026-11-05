@@ -1,6 +1,6 @@
 # Troubleshooting
 
-Problems you may hit while running Claude Code on kagent 1.x and Agent Substrate, and how to check them. The commands assume the `kagent` namespace and the `kagent-default` worker pool from the [README](README.md). Items marked *(source)* come from reading the kagent `v1.0.0-alpha7` code and were not triggered during testing.
+Problems you may hit while running Claude Code on kagent 1.x and Agent Substrate, and how to check them. The commands assume the `kagent` namespace and the `kagent-default` worker pool from the [README](README.md). Items marked *(source)* come from reading the kagent `v1.0.0-alpha7` code (not re-read for rc2) and were not triggered during testing.
 
 ## The agent is not `READY`
 
@@ -10,7 +10,7 @@ kubectl get agent claude -n kagent -o jsonpath='{range .status.conditions[*]}{.t
 
 - `ActorTemplate golden snapshot` pending: normal for the first minute or two after you create or change the Harness. Wait for it.
 - `ResolvedRefs=False`: a name in `claude.yaml` does not match. Check that `anthropic-model-config`, `claude-template`, and `claude-harness` exist in `kagent`.
-- The image reference is a tag, not a digest. Substrate rejects a tag alone, because a revision must be reproducible. Use the `@sha256:` form from `docker buildx imagetools inspect ghcr.io/kagent-dev/kagent/claude-harness:1.0.0-alpha7`. The tag has no `v` in front (`v1.0.0-alpha7` does not exist). *(source)*
+- The image reference is a tag, not a digest. Substrate rejects a tag alone, because a revision must be reproducible. Use the `@sha256:` form from `docker buildx imagetools inspect ghcr.io/kagent-dev/kagent/claude-harness:1.0.0-rc2`. The tag has no `v` in front (`v1.0.0-rc2` does not exist). *(source)*
 
 ## The template or Harness is rejected at compile time
 

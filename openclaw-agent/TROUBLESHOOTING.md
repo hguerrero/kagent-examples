@@ -100,6 +100,25 @@ python3 scripts/mcp-list.py http://127.0.0.1:18091/mcp
 
 A tool the policy does not match is missing from the list on purpose. OpenClaw names a tool after the server and the tool, in camel case, as in `k8sGetPodLogs`. A new session picks up a template change. An existing session keeps the revision it started with.
 
+## The first turn fails with `ACP initialize: context deadline exceeded`
+
+The worker log shows `Killing a sandbox over its memory limit`, with `memoryLimitBytes` of 1073741824 and a usage just above it:
+
+```bash
+kubectl logs -n kagent deploy/kagent-default --tail=3000 | grep "memory limit"
+```
+
+kagent 1.0 limits every actor to 1 CPU and 1 GiB, and the OpenClaw gateway needs about 1 GB, more while it recovers a session after a restore. Raise `config.runtimeDefaults` as in the [Quickstart](README.md#quickstart), then **delete and re-create the Harness, AgentTemplate, and Agent**: an Agent keeps the limit it was compiled with, so a new default does not reach it. Check the limit the actor got in the same log line.
+
+## An approval fails with `runtime has no parked turn to continue`
+
+The image is built for kagent 1.0.0-alpha7, whose adapter kept the parked turn in memory. kagent 1.0.0-rc2 suspends the actor with only its volumes, so the memory is gone when you answer. Build the image from this repo, which restores the turn from `/data/adapter/pending.json`.
+
+## `approve.sh` fails with `this version is not supported: requested "0.3", served "1.0"`
+
+The controller serves A2A 1.0 and the request did not say so. The scripts in this repo send `A2A-Version: 1.0`. Add the header if you call the endpoint yourself.
+
 ## OpenClaw is slow, or reports `memory pressure: critical`
 
-The gateway needs about 1 GB. Harness actors in this setup have no memory limit, but a standalone sandbox from `kagent sandbox create` gets 1 GiB by default and OpenClaw stalls in it. The adapter logs `actor resources` with the memory and CPUs it sees when it starts OpenClaw. Raise `controller.sandbox.memory` in the kagent Helm values if you need a sandbox for debugging.
+The gateway needs about 1 GB. The adapter logs `actor resources` with the memory and CPUs it sees when it starts OpenClaw. A standalone sandbox from `kagent sandbox create` gets 1 GiB by default and OpenClaw stalls in it. Raise `config.sandboxes.memory` in the kagent Helm values if you need a sandbox for debugging.
+
