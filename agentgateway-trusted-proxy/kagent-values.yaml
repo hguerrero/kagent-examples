@@ -1,4 +1,4 @@
-# Passed to `helm upgrade kagent ... --reuse-values`, after __PORT__ is filled in.
+# Passed to `kagent install` through a --config file, after __PORT__ is filled in.
 #
 # The controller trusts the bearer token oauth2-proxy forwards, and reads the
 # user from its `email` claim. oauth2-proxy signs browsers in and verifies bearer
@@ -8,10 +8,11 @@
 #   redeem-url  where the proxy exchanges the code (the in-cluster name)
 #   oidc-jwks-url / oidc-issuer-url  how it verifies tokens (keys in-cluster,
 #               the issuer string as Dex writes it into the token)
-controller:
-  auth:
-    mode: trusted-proxy
-    userIdClaim: email
+config:
+  server:
+    auth:
+      mode: trusted-proxy
+      userIdClaim: email
 ui:
   httpRoute:
     enabled: false

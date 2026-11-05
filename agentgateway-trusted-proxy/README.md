@@ -20,7 +20,7 @@ flowchart LR
 
 - **There is one public door for kagent.** `kagent.localtest.me` goes to oauth2-proxy and nowhere else. The UI Service and the controller have no route of their own, which is what the kagent doc asks for.
 - **oauth2-proxy is the boundary that verifies.** It signs browsers in with a session cookie, and it verifies the signature and expiry of bearer tokens from API clients (`skip-jwt-bearer-tokens`). The controller does not verify anything. The doc says its authenticator "decodes bearer JWT payloads without verifying signatures or expiry".
-- **The user comes from the token.** `controller.auth.userIdClaim: email` makes the controller take the user from the `email` claim. The UI's nginx always removes `X-User-Id` and `X-Agent-Name` from outside requests in this mode, so a caller cannot choose another user.
+- **The user comes from the token.** `config.server.auth.userIdClaim: email` makes the controller take the user from the `email` claim. The UI's nginx always removes `X-User-Id` and `X-Agent-Name` from outside requests in this mode, so a caller cannot choose another user.
 - **The NetworkPolicies are not optional.** Because the controller trusts what reaches it, anything that can connect to it can claim to be any user. I tested this: a pod in another namespace sent an unsigned token that claimed to be `admin@kagent.dev` straight to the controller, and got the admin's sessions. The chart does not ship these policies.
 - **Dex is told apart from the app by name.** The browser reaches Dex at `dex.kagent.localtest.me`, and oauth2-proxy reaches it inside the cluster. `extraArgs` in `kagent-values.yaml` gives oauth2-proxy both addresses.
 
@@ -47,7 +47,7 @@ I tested these, and they matter:
 
 ## Before you start
 
-- A Kubernetes cluster running kagent 1.x, installed as in the [kagent installation guide](https://kagent.dev/docs/kagent/1.x/setup/installation/), with at least one Agent in the `kagent` namespace. I tested on kagent 1.0.0-alpha7 with agents running on Agent Substrate.
+- A Kubernetes cluster running kagent 1.x, installed as in the [kagent installation guide](https://kagent.dev/docs/kagent/1.x/setup/installation/), with at least one Agent in the `kagent` namespace. I tested on kagent 1.0.0-rc2, installed with `kagent install`, with an agent running on Agent Substrate.
 - A CNI that enforces NetworkPolicy. I used `kind` with its default `kindnet`, and it does.
 - On your machine: `kubectl`, `helm`, `openssl`, `htpasswd`, `python3`, `jq`, and `curl`. For the browser check you also need `node` and Chrome.
 
@@ -104,12 +104,18 @@ This example changes your controller's auth mode. Once it is on, the `kagent` CL
 
    The Secret also holds the client ID, which must equal the client `id` in `idp.yaml`, and a cookie secret that oauth2-proxy uses to encrypt the session cookie.
 
-4. Switch kagent to `trusted-proxy` and turn on oauth2-proxy. `--reuse-values` keeps your providers and keys.
+4. Switch kagent to `trusted-proxy` and turn on oauth2-proxy. `kagent install` takes no Helm flags, so the values go in a file that a CLI config points to. Run it again with the same provider key you installed with, because the CLI sets its own values on each run and does not keep the earlier ones.
 
    ```bash
-   sed "s|__PORT__|$PORT_SUFFIX|g" kagent-values.yaml | \
-     helm upgrade kagent oci://ghcr.io/kagent-dev/kagent/helm/kagent --version 1.0.0-alpha7 \
-       -n kagent --reuse-values -f -
+   sed "s|__PORT__|$PORT_SUFFIX|g" kagent-values.yaml > kagent-values.out.yaml
+   cat > kagent-config.yaml <<EOF
+   install:
+     kagent:
+       valuesFiles: [kagent-values.out.yaml]
+   EOF
+
+   export OPENAI_API_KEY=<the provider key you installed kagent with>
+   kagent --config kagent-config.yaml install --namespace kagent
    kubectl -n kagent rollout status deploy/kagent-oauth2-proxy deploy/kagent-controller
    ```
 
@@ -160,6 +166,8 @@ Open `https://kagent.localtest.me:8443`, choose the sign-in, and use `alice@exam
 
 ## Notes
 
+- **The chart keys moved in rc2.** The controller's auth settings are `config.server.auth.mode` and `config.server.auth.userIdClaim`. The alpha7 keys `controller.auth.*` are gone, and Helm ignores unknown keys without a warning, so the controller would stay in `insecure` mode with oauth2-proxy running in front of it. Check with `helm get values kagent -n kagent`.
+- **The session service was renamed.** The UI and the smoke test call `kagent.api.v1.SessionService`, not `kagent.api.v1alpha1.SessionService`. A call to the old name returns HTTP 200 with `grpc-status: 12` in the headers, so a check on the HTTP status alone passes. Session creators are stored as `<base64url issuer>.<base64url email>`, and the smoke test decodes them.
 - **The cookie secret must be URL-safe.** The kagent doc says to use "a random 32-byte key, base64 encoded". oauth2-proxy reads the value as raw text unless it decodes as URL-safe base64, and the standard alphabet's `+` and `/` break that. It then fails with `cookie_secret must be 16, 24, or 32 bytes ... but is 44 bytes`. Whether a key breaks depends on the random bytes. The command above swaps `+/` for `-_`.
 - **The oauth2-proxy Service is on port 4180.** The subchart's own values suggest 80.
 - **Dex needs `/healthz`.** Its `/healthz/ready` path is on a different, optional server, and the readiness probe gets a 404.
@@ -173,13 +181,12 @@ Open `https://kagent.localtest.me:8443`, choose the sign-in, and use `alice@exam
 
 ```bash
 kubectl delete -f network-policy.yaml -f routes.yaml --ignore-not-found
-helm upgrade kagent oci://ghcr.io/kagent-dev/kagent/helm/kagent --version 1.0.0-alpha7 \
-  -n kagent --reuse-values --set controller.auth.mode=insecure --set oauth2-proxy.enabled=false
+kagent install --namespace kagent    # without the --config file, so the auth values go back to the defaults
 kubectl delete secret kagent-oidc -n kagent
 kubectl delete -f gateway.yaml
 kubectl delete namespace idp
 ```
 
-`--reuse-values` keeps the values from step 4 in the release config, inactive. If you want the release exactly as it was, run `helm history kagent -n kagent`, and then `helm rollback kagent <the revision before step 4> -n kagent`.
+The plain `kagent install` resets the values to what the CLI sets, so the controller goes back to `insecure` and oauth2-proxy goes off.
 
 Leave agentgateway installed if you use it for anything else. To remove it, run `helm uninstall agentgateway agentgateway-crds -n agentgateway-system`.

@@ -45,15 +45,24 @@ EMPTY='\x00\x00\x00\x00\x00'
 UI_REQUEST='\x00\x00\x00\x00\x04\x10\x01\x1a\x00'
 list_sessions() {  # token, body, extra curl args. Prints the session owners seen
   local tk="$1" body="$2"; shift 2
-  printf "$body" | curl_tls -X POST "$KAGENT/api/kagent.api.v1alpha1.SessionService/ListSessions" \
+  printf "$body" | curl_tls -X POST "$KAGENT/api/kagent.api.v1.SessionService/ListSessions" \
     -H "Authorization: Bearer $tk" -H 'Content-Type: application/grpc-web+proto' -H 'X-Grpc-Web: 1' "$@" --data-binary @- \
-    | python3 -c "import sys,re; t=sys.stdin.buffer.read().decode('latin1'); print(' '.join(sorted(set(re.findall(r'[a-z0-9._-]+@[a-z0-9.-]+', t)))) or 'none')"
+    | python3 -c "
+import sys, re, base64
+t = sys.stdin.buffer.read().decode('latin1')
+seen = set(re.findall(r'[a-z0-9._-]+@[a-z0-9.-]+', t))
+# kagent 1.0 stores the creator as <base64url issuer>.<base64url email>
+for m in re.finditer(r'[A-Za-z0-9_-]{16,}\.([A-Za-z0-9_-]{8,})', t):
+    try: d = base64.urlsafe_b64decode(m.group(1) + '=' * (-len(m.group(1)) % 4)).decode()
+    except Exception: continue
+    if re.fullmatch(r'[a-z0-9._-]+@[a-z0-9.-]+', d): seen.add(d)
+print(' '.join(sorted(seen)) or 'none')"
 }
 
 echo "agent: $NAMESPACE/$AGENT"
 echo "== anonymous callers"
 expect "the UI is not served to an anonymous caller" "$(curl_tls -o /dev/null -w '%{http_code}' "$KAGENT/")" 403
-expect "the API is not served to an anonymous caller" "$(printf "$EMPTY" | curl_tls -o /dev/null -w '%{http_code}' -X POST "$KAGENT/api/kagent.api.v1alpha1.SessionService/ListSessions" -H 'Content-Type: application/grpc-web+proto' --data-binary @-)" 403
+expect "the API is not served to an anonymous caller" "$(printf "$EMPTY" | curl_tls -o /dev/null -w '%{http_code}' -X POST "$KAGENT/api/kagent.api.v1.SessionService/ListSessions" -H 'Content-Type: application/grpc-web+proto' --data-binary @-)" 403
 start="$(curl_tls -o /dev/null -w '%{http_code} %{redirect_url}' "$KAGENT/oauth2/start")"
 case "$start" in "302 $DEX/auth?"*) ok "sign-in redirects to the identity provider";; *) fail "sign-in redirect: $start";; esac
 
@@ -66,8 +75,8 @@ b = lambda d: base64.urlsafe_b64encode(json.dumps(d).encode()).rstrip(b"=").deco
 print(b({"alg": "none", "typ": "JWT"}) + "." + b({"email": "admin@kagent.dev", "sub": "forged"}) + ".x")
 PY
 )"
-expect "a forged token is refused at the proxy" "$(printf "$EMPTY" | curl_tls -o /dev/null -w '%{http_code}' -X POST "$KAGENT/api/kagent.api.v1alpha1.SessionService/ListSessions" -H "Authorization: Bearer $forged" -H 'Content-Type: application/grpc-web+proto' --data-binary @-)" 403
-expect "a token from the identity provider is accepted" "$(printf "$EMPTY" | curl_tls -o /dev/null -w '%{http_code}' -X POST "$KAGENT/api/kagent.api.v1alpha1.SessionService/ListSessions" -H "Authorization: Bearer $ALICE" -H 'Content-Type: application/grpc-web+proto' --data-binary @-)" 200
+expect "a forged token is refused at the proxy" "$(printf "$EMPTY" | curl_tls -o /dev/null -w '%{http_code}' -X POST "$KAGENT/api/kagent.api.v1.SessionService/ListSessions" -H "Authorization: Bearer $forged" -H 'Content-Type: application/grpc-web+proto' --data-binary @-)" 403
+expect "a token from the identity provider is accepted" "$(printf "$EMPTY" | curl_tls -o /dev/null -w '%{http_code}' -X POST "$KAGENT/api/kagent.api.v1.SessionService/ListSessions" -H "Authorization: Bearer $ALICE" -H 'Content-Type: application/grpc-web+proto' --data-binary @-)" 200
 
 if [ -z "${SKIP_BROWSER:-}" ]; then
   echo "== a person signs in and runs a turn longer than 15 seconds"
@@ -92,7 +101,7 @@ if [ -z "${SKIP_NETPOL:-}" ]; then
   echo "== a pod in another namespace"
   out="$(kubectl run smoke-probe --rm -i --restart=Never -n default --image=curlimages/curl:8.10.1 --quiet --command -- sh -c "
     printf '\\000\\000\\000\\000\\000' > /tmp/e
-    curl -s -m 8 -o /dev/null -w '%{http_code}' -X POST http://kagent-controller.$NAMESPACE.svc:8083/api/kagent.api.v1alpha1.SessionService/ListSessions \
+    curl -s -m 8 -o /dev/null -w '%{http_code}' -X POST http://kagent-controller.$NAMESPACE.svc:8083/api/kagent.api.v1.SessionService/ListSessions \
       -H 'Authorization: Bearer $forged' -H 'Content-Type: application/grpc-web+proto' -H 'X-Grpc-Web: 1' --data-binary @/tmp/e || echo -n ' curl-failed'" 2>&1 | tail -1)"
   case "$out" in *curl-failed*|000*) ok "a forged token cannot reach the controller from another namespace";;
     *) fail "the controller answered a pod in the default namespace ($out). Apply network-policy.yaml, and use a CNI that enforces it";; esac
