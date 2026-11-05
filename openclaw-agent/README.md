@@ -4,6 +4,10 @@ Run [OpenClaw](https://openclaw.ai) on [kagent](https://kagent.dev) 1.x and Agen
 
 This is the kagent 1.x version of the setup in Tom O'Rourke's post, [Running OpenClaw 2.0 as a kagent AgentHarness on Agent Substrate](https://mastertheagent.com/solo/agent-harness-openclaw-kind/), which used kagent 0.10.1. kagent 1.0 removed `AgentHarness` and its `openclaw` backend with no replacement, so this example runs OpenClaw as a bring-your-own `Harness` instead, behind a small adapter. It is part of [kagent-examples](../README.md). The other bring-your-own example, [`pi-agent`](../pi-agent/), uses the same pattern for a different agent.
 
+> **Build your own image.** `openclaw.yaml` points at `hguerrero0/openclaw-agent:1.0.0-rc2`, pinned by digest. That is the maintainer's image. It is there as an example of the reference format and for the maintainer's own tests that check these instructions, and it can change or disappear without notice. Build the image from this repo, push it to a registry you control, and put its digest in the manifest before you apply it. See [Build and push your image](#build-and-push-your-image).
+
+> **Status on kagent 1.0.0-rc2.** The adapter is ported and runs on rc2 (see [Tested with](#tested-with)). The alpha7 image that earlier revisions of this example used stops at start-up on rc2.
+
 ## What maps to what
 
 | In the kagent 0.10.1 post | In this example |
@@ -16,7 +20,7 @@ This is the kagent 1.x version of the setup in Tom O'Rourke's post, [Running Ope
 | agentgateway on the model path | Not needed: the egress gateway already holds the only provider key |
 | `openclaw mcp set` run over ACP to register a tool server | A `RemoteMCPServer` in the `AgentTemplate`. The adapter writes OpenClaw's MCP registry |
 | agentgateway on the tool path, with a four-tool allow-list | The same, unchanged (`tools-gateway.yaml`) |
-| Exec approval over ACP | The task pauses in `INPUT_REQUIRED`, and the actor in `ACTOR_STATE_PAUSED` |
+| Exec approval over ACP | The task pauses in `INPUT_REQUIRED`, and the actor suspends. The answer is replayed to OpenClaw after the restore |
 | Changing `modelConfigRef` re-created the harness and deleted the workspace | Each session has its own actor and its own `/data` |
 
 ## How it works
@@ -56,11 +60,44 @@ flowchart LR
 ## Prerequisites
 
 - The base setup from the [repo README](../README.md#prerequisites): a cluster with Agent Substrate and kagent 1.x installed, plus `kubectl`, the `kagent` CLI, `kubectl-ate`, and `jq`.
+- Docker and a registry you can push to. You build and push the adapter image yourself: see [Build and push your image](#build-and-push-your-image).
 - An [Anthropic API key](https://console.anthropic.com/).
-- Memory: the OpenClaw gateway uses about 1 GB while an actor runs. Each running actor holds a worker, and each one runs its own gateway.
+- Resources: the OpenClaw gateway uses about 1 GB while an actor runs, and about 2 GB while it recovers a session after a restore. kagent 1.0 limits every actor to 1 CPU and 1 GiB by default, and Substrate kills the actor when it goes over (`Killing a sandbox over its memory limit` in the worker log). Raise the limit, as described under [Quickstart](#quickstart). Each running actor also holds a worker, and each one runs its own gateway.
 - For the tool part: `helm`, to install agentgateway.
 
+## Build and push your image
+
+You need Docker and a registry you can push to, such as Docker Hub or GHCR. The build, the push, and the digest below are required steps. The manifests carry the maintainer's `hguerrero0/openclaw-agent` digest only as an example of the format. Replace it with yours.
+
+```bash
+docker build -t <registry>/openclaw-agent:0.1 -f Dockerfile.openclaw .
+docker push <registry>/openclaw-agent:0.1
+docker inspect --format='{{index .RepoDigests 0}}' <registry>/openclaw-agent:0.1
+```
+
+Put the printed `<registry>/openclaw-agent@sha256:...` reference in the `workload.image` field of `openclaw.yaml`. Substrate pins images by digest, so a tag or a local image will not work. Pin OpenClaw with `--build-arg OPENCLAW_VERSION=<version>`. The adapter refuses to start outside kagent, because it needs the agent card and the compiled configuration that kagent supplies. That is expected.
+
 ## Quickstart
+
+Raise the actor limit first. `kagent install` takes no Helm flags, so the value goes in a values file that a CLI config points to. Use the same provider key you installed kagent with. An existing Agent keeps the limit it was compiled with, so create the agent after this step:
+
+```bash
+cat > kagent-values.yaml <<EOF
+config:
+  runtimeDefaults:
+    cpu: "2"
+    memory: 4Gi
+EOF
+cat > kagent-config.yaml <<EOF
+install:
+  kagent:
+    valuesFiles: [kagent-values.yaml]
+EOF
+export OPENAI_API_KEY=<the provider key you installed kagent with>
+kagent --config kagent-config.yaml install --namespace kagent
+```
+
+Then:
 
 ```bash
 # 1. Secret and model. If you installed kagent with
@@ -99,18 +136,6 @@ kagent agent invoke --session $SESSION_ID --task "Create hello.txt with a one-li
 kagent agent session delete $SESSION_ID
 ```
 
-### Use your own image
-
-`openclaw.yaml` points at a prebuilt, public, multi-arch image (`linux/amd64` and `linux/arm64`), `hguerrero0/openclaw-agent`. Building your own means you run exactly what is in this repo, and you control the OpenClaw version:
-
-```bash
-docker build -t <registry>/openclaw-agent:0.1 -f Dockerfile.openclaw .
-docker push <registry>/openclaw-agent:0.1
-docker inspect --format='{{index .RepoDigests 0}}' <registry>/openclaw-agent:0.1
-```
-
-Put the printed `<registry>/openclaw-agent@sha256:...` reference in the `workload.image` field of `openclaw.yaml`. Substrate pins images by digest, so a tag or a local image will not work. Pin OpenClaw with `--build-arg OPENCLAW_VERSION=<version>`. The adapter refuses to start outside kagent, because it needs the agent card and the compiled configuration that kagent supplies. That is expected.
-
 ## Approving commands
 
 By default OpenClaw runs commands without asking, because the actor and its egress policy are the boundary. To approve each command, set `OPENCLAW_EXEC_MODE` to `ask` in the `Harness` env of `openclaw.yaml` and apply it. OpenClaw then pauses before any command that is not on its allowlist.
@@ -126,7 +151,13 @@ kagent agent invoke --session $SESSION_ID --task "Run hostname with your exec to
 ./scripts/approve.sh $SESSION_ID reject "no shell here"   # or reject
 ```
 
-While the request is pending, `kubectl ate get actors --atespace kagent` shows the actor as `ACTOR_STATE_PAUSED`, with no worker. A rejected command comes back to OpenClaw as `user-denied`. The reason text is not passed on, because ACP has no field for it.
+While the request is pending, `kubectl ate get actors --atespace kagent` shows the actor as `ACTOR_STATE_SUSPENDED`, with no worker. kagent 1.0 suspends an actor with only its volumes, so the OpenClaw gateway that asked is gone when you answer, and OpenClaw cannot carry a permission request across a restart. The adapter handles this in three steps:
+
+1. When the turn parks, it ends the OpenClaw run and writes the request to `/data/adapter/pending.json`.
+2. When you answer, kagent restores the actor, and the adapter rebuilds the pending turn from that file (kagent's `PendingRestorer`).
+3. It starts OpenClaw on the same session, which reloads its transcript, and replays your decision as a message. An approval tells OpenClaw to run that command now, and the adapter allows that one command when OpenClaw asks again. A rejection passes your reason on, so OpenClaw can say what it will do instead.
+
+OpenClaw also re-runs on its own any session that was still running when its gateway died, with a restricted tool set. The adapter waits for that run to end before it replays your decision. An approval therefore takes about 30 seconds to complete on a `kind` cluster, and the model often takes more than one try at the command.
 
 An approval decides one command. It does not bound what OpenClaw can reach, and the original post saw OpenClaw reach the same result with another tool after a rejection. The boundary is the tool list and the egress policy.
 
@@ -165,7 +196,7 @@ kubectl get remotemcpserver sre-tools -n kagent -o jsonpath='{.status.discovered
 ./scripts/sre-test.sh
 ```
 
-OpenClaw finds all four broken workloads: `checkout` (missing `DATABASE_URL`), `search` (an image tag that does not exist), `report-worker` (OOMKilled), and `ml-scorer` (asks for 64 CPUs). Asked to restart `checkout`, it says `NO-WRITE-TOOL` and lists its four tools. OpenClaw names them `k8sGetResources`, `k8sGetPodLogs`, and so on, and the script checks that the deployment did not change.
+OpenClaw finds all four broken workloads: `checkout` (missing `DATABASE_URL`), `search` (an image tag that does not exist), `report-worker` (OOMKilled), and `ml-scorer` (asks for 64 CPUs). Asked to restart `checkout`, it says `NO-WRITE-TOOL` and lists its four tools. OpenClaw names them `k8sGetResources`, `k8sGetPodLogs`, and so on (this version prefixes them with `MCP.toolsGateway.`), and the script checks that the deployment did not change.
 
 `kagent-tools` is a plain MCP server with no authentication, so the gateway is the only boundary here. The actor can still reach the Kubernetes API server on the network. It holds no credentials for it, but nothing blocks the route. Closing that is a `NetworkPolicy` job and is not covered here.
 
@@ -191,38 +222,36 @@ kubectl delete secret kagent-anthropic -n kagent   # only if you created it your
 
 ## Tested with
 
-Validated end to end on 2026-10-08 on a local `kind` cluster (Kubernetes 1.37.0, arm64).
+Validated on 2026-11-05 on a local `kind` cluster (Kubernetes 1.37.0, arm64, Docker with 11.6 GB), installed with `kagent install`. The image is the maintainer's test image, `hguerrero0/openclaw-agent@sha256:070faa61...` (`1.0.0-rc2`, multi-arch), built from this repo and pulled from Docker Hub with the digest in `openclaw.yaml`. An image you build from the same source is what these instructions expect you to run. The adapter tests, the integration tests, and `sre-test.sh` ran on a build of the same source from a local registry, and the smoke test and an exec approval were repeated with the published image.
 
 | Component | Version |
 | :--- | :--- |
-| Substrate (`substrate`, `substrate-crds` charts) | 0.3.0-alpha3 |
-| kagent (`kagent`, `kagent-crds` charts) and CLI | 1.0.0-alpha7 |
-| Worker image | `ghcr.io/kagent-dev/substrate/ateom-gvisor:v0.3.0-alpha3` |
-| kagent Go ADK and harness runtime (adapter dependency) | commit `542e0a7a82f0f32d09c398f9c56319a3f617c93a` (`v1.0.0-alpha7`) |
+| kagent (CLI, charts, controller) | 1.0.0-rc2 |
+| Substrate (installed by `kagent install`) | 1.0.0-rc2 |
+| kagent Go ADK and harness runtime (adapter dependency) | commit `4a5c758598a983c47ea14ea1757b191db8423884` (`v1.0.0-rc2`) |
+| Actor limits | 2 CPUs and 4 GiB (`config.runtimeDefaults`) |
 | OpenClaw | 2026.9.9 (`openclaw` on npm, installed with `--ignore-scripts`) |
 | agentgateway (OSS) | v1.6.0 |
 | Gateway API | v1.6.0 |
 | Model | `claude-sonnet-5-5` |
-| Go | 1.27.1 |
+| Go | 1.27.3 |
 | Node | 24 (`node:24-bookworm-slim`) |
 
 What was run:
-- The adapter builds and passes `go vet`, the unit tests, and the integration tests. The integration tests run a real OpenClaw in the image against a scripted model: a turn with tool calls, an exec approval that is allowed and one that is rejected, and a conversation that survives a hard kill and restart.
+- The adapter builds and passes `go vet`, the unit tests, and the integration tests. The integration tests run a real OpenClaw in the image against a scripted model: a turn with tool calls, an exec approval that is allowed and one that is rejected, a conversation that survives a hard kill and restart, and an approval that is answered after the gateway was killed.
 - `scripts/smoke-test.sh` passed on the cluster: suspend after each turn, then recall and file persistence on resume.
-- An exec approval in `ask` mode paused the actor (`ACTOR_STATE_PAUSED`). Approving it ran the command inside the gVisor kernel and the task completed. Rejecting it gave OpenClaw `user-denied`, and it reported that the command never ran.
-- `scripts/sre-test.sh` passed: all four broken workloads found through four tools, and `NO-WRITE-TOOL` for the restart. The gateway published 4 of 126 tools.
-- The actor environment held `ANTHROPIC_API_KEY=kagent-credential-injected`, and model calls succeeded through the egress gateway.
-- The managed system prompt reached OpenClaw: asked to quote `AGENTS.md`, it returned the template's text.
+- An exec approval in `ask` mode suspended the actor (`ACTOR_STATE_SUSPENDED`). After the approval the restored actor ran `uname -a` and the answer contained its output (`Linux actor 4.19.0-gvisor ... aarch64`). A rejection with a reason also completed the task.
+- `scripts/sre-test.sh` passed: all four broken workloads found through four tools, and `NO-WRITE-TOOL` for the restart.
+- The agent reached `READY` with the rc2 adapter, and the egress gateway injected the Anthropic key.
 
 Not run:
-- The amd64 image on an amd64 cluster. The multi-arch image was built, but only the arm64 variant ran.
-- The kagent 1.0.0-alpha8 and alpha9 releases, and Substrate 0.4.0-alpha1.
-- A pending approval left for hours. Approvals were answered within seconds.
-- A custom `baseUrl` against a live provider. The integration tests use one against a scripted server.
+- The amd64 variant. It is built from the same source and published in the same image, but the cluster was arm64.
+- The content of the model's answer after a rejection. The tests check that the reason reaches OpenClaw and that the command does not run, and the cluster run completed.
+- A pending approval left for hours, approving from the kagent UI, and a custom `baseUrl` against a live provider.
 - OpenClaw's browser tool, channels, and skills from ClawHub. The image has no Chromium.
 - The standalone `OpenClaw 2.0` Docker baseline from the original post. It does not depend on kagent, so it is not repeated here.
 
-These are alpha releases, so the pins will drift. Check the [kagent 1.x docs](https://kagent.dev/docs/kagent/1.x/) for current versions.
+The earlier run on kagent 1.0.0-alpha7 and Substrate 0.3.0-alpha3 (2026-10-08) passed the same smoke test, approval flow, and `sre-test.sh`. These are release candidates, so the pins can still change. Check the [kagent 1.x docs](https://kagent.dev/docs/kagent/1.x/) for current versions.
 
 ## Troubleshooting
 
@@ -231,7 +260,7 @@ See [TROUBLESHOOTING.md](TROUBLESHOOTING.md) for `input was not accepted`, turns
 ## Notes
 
 - **OpenClaw's native file helper fails under gVisor.** OpenClaw writes files through a native helper. In an actor it fails with no error code, and OpenClaw reports `path is not a regular file under root` for every file it tries to create, including the one for the first message. Its JavaScript fallback works, so the adapter sets `FS_SAFE_NATIVE_MODE=off`. Set that variable in the `Harness` env to override it.
-- **The harness actors have no memory limit here, but the standalone sandbox does.** An actor in this cluster sees all of the node's memory. A standalone sandbox from `kagent sandbox create` gets the controller's sandbox policy, which is 1 GiB by default. OpenClaw's gateway uses about 900 MB, and in a 1 GiB sandbox it reported `memory pressure: critical` and its worker tasks timed out. Do not use a default sandbox to debug OpenClaw, or raise `controller.sandbox.memory` (a Helm value) first.
+- **Actors have a memory limit, and OpenClaw needs more than the default.** kagent 1.0 gives every actor 1 CPU and 1 GiB (`config.runtimeDefaults`). OpenClaw's gateway uses about 1 GB, so the first turn is killed with `Killing a sandbox over its memory limit` and fails with `ACP initialize: context deadline exceeded`. The limit is compiled into the agent, so changing it takes effect for agents you create afterwards. The Quickstart sets 2 CPUs and 4 GiB. A standalone sandbox from `kagent sandbox create` has its own limit (`config.sandboxes.memory`, 1 GiB by default), and OpenClaw reports `memory pressure: critical` in it.
 - **Every resume is an unclean start for OpenClaw.** Substrate keeps only `/data`, so OpenClaw logs `restart-loop breaker tripped` after a few resumes in five minutes. The breaker stops channels and provider accounts from starting on their own. This setup uses neither, and turns were not affected.
 - **State lease.** OpenClaw keeps a lease on its state directory and recovers it from a dead process by the process's host name and start time. Resume worked in a Substrate actor, whose host name is stable. If you run the image elsewhere with a changing host name, a restart can fail with `Another Gateway owner lease is still active` until the 5-minute lease expires.
 - **Only `exec` can ask for approval.** The `requireApproval` setting on an MCP tool binding is for tools OpenClaw cannot gate, so the adapter refuses to start when a template sets it, instead of running the tool unapproved. Use the gateway to limit tools.

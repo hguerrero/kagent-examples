@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -52,6 +53,20 @@ func fakeACP(scenario string) {
 				update(map[string]any{"sessionUpdate": "agent_message_chunk", "content": map[string]any{"type": "text", "text": "Done."}})
 				reply(map[string]any{"stopReason": "end_turn"})
 			case "approval":
+				// A replayed rejection is just answered. Anything else asks to run
+				// the command, as OpenClaw does for the first prompt and again for a
+				// replayed approval.
+				var ap struct {
+					Prompt []struct {
+						Text string `json:"text"`
+					} `json:"prompt"`
+				}
+				_ = json.Unmarshal(m.Params, &ap)
+				if len(ap.Prompt) > 0 && strings.Contains(ap.Prompt[0].Text, "rejected this exec command") {
+					update(map[string]any{"sessionUpdate": "agent_message_chunk", "content": map[string]any{"type": "text", "text": "noted"}})
+					reply(map[string]any{"stopReason": "end_turn"})
+					break
+				}
 				update(map[string]any{"sessionUpdate": "tool_call", "toolCallId": "c1", "title": "exec: command: uname -a", "rawInput": map[string]any{"command": "uname -a"}})
 				_ = out.Encode(map[string]any{"jsonrpc": "2.0", "id": 0, "method": "session/request_permission", "params": map[string]any{
 					"sessionId": "s1",
@@ -65,6 +80,7 @@ func fakeACP(scenario string) {
 					},
 				}})
 				// Wait for the client's answer to the permission request, then finish accordingly.
+				stop := "end_turn"
 				for in.Scan() {
 					var a struct {
 						ID     json.RawMessage `json:"id"`
@@ -78,6 +94,11 @@ func fakeACP(scenario string) {
 					if json.Unmarshal(in.Bytes(), &a) != nil || string(a.ID) != "0" {
 						continue
 					}
+					if a.Result.Outcome.Outcome == "cancelled" {
+						// The adapter ended the run: the actor is about to be suspended.
+						stop = "cancelled"
+						break
+					}
 					status := "completed"
 					if a.Result.Outcome.OptionID == "deny" {
 						status = "failed"
@@ -86,8 +107,54 @@ func fakeACP(scenario string) {
 					update(map[string]any{"sessionUpdate": "agent_message_chunk", "content": map[string]any{"type": "text", "text": "answer=" + a.Result.Outcome.OptionID}})
 					break
 				}
-				reply(map[string]any{"stopReason": "end_turn"})
+				reply(map[string]any{"stopReason": stop})
 			case "silent":
+				reply(map[string]any{"stopReason": "end_turn"})
+			case "replay":
+				// A fresh OpenClaw handed the decision of an approval that was parked
+				// before a suspend. It asks for the same command again when told it
+				// was approved, and just answers when told it was rejected.
+				var p struct {
+					Prompt []struct {
+						Text string `json:"text"`
+					} `json:"prompt"`
+				}
+				_ = json.Unmarshal(m.Params, &p)
+				text := ""
+				if len(p.Prompt) > 0 {
+					text = p.Prompt[0].Text
+				}
+				update(map[string]any{"sessionUpdate": "agent_message_chunk", "content": map[string]any{"type": "text", "text": "prompt=" + text + "\n"}})
+				if !strings.Contains(text, "approved") {
+					reply(map[string]any{"stopReason": "end_turn"})
+					break
+				}
+				_ = out.Encode(map[string]any{"jsonrpc": "2.0", "id": 0, "method": "session/request_permission", "params": map[string]any{
+					"sessionId": "s1",
+					"toolCall": map[string]any{
+						"toolCallId": "c2", "title": "exec: command: uname -a", "rawInput": map[string]any{"command": "uname -a"},
+						"_meta": map[string]any{"toolName": "exec", "approvalId": "appr-2"},
+					},
+					"options": []any{
+						map[string]any{"optionId": "allow-once", "name": "Allow once", "kind": "allow_once"},
+						map[string]any{"optionId": "deny", "name": "Deny", "kind": "reject_once"},
+					},
+				}})
+				for in.Scan() {
+					var a struct {
+						ID     json.RawMessage `json:"id"`
+						Result struct {
+							Outcome struct {
+								OptionID string `json:"optionId"`
+							} `json:"outcome"`
+						} `json:"result"`
+					}
+					if json.Unmarshal(in.Bytes(), &a) != nil || string(a.ID) != "0" {
+						continue
+					}
+					update(map[string]any{"sessionUpdate": "agent_message_chunk", "content": map[string]any{"type": "text", "text": "answer=" + a.Result.Outcome.OptionID}})
+					break
+				}
 				reply(map[string]any{"stopReason": "end_turn"})
 			}
 		}
@@ -119,6 +186,7 @@ func newFakeBridge(t *testing.T, scenario string) *fakeBridge {
 
 func (f *fakeBridge) session(context.Context) (*acpClient, string, error) { return f.client, "s1", nil }
 func (f *fakeBridge) reset(*acpClient)                                    {}
+func (f *fakeBridge) awaitRecovery(context.Context)                       {}
 func (f *fakeBridge) modelError(since time.Time) string {
 	if f.logLine != "" {
 		_, _ = f.errs.Write([]byte(f.logLine))
@@ -144,6 +212,7 @@ func (r *recorder) ToolResult(e runtime.ToolResult) error {
 	r.results = append(r.results, e)
 	return nil
 }
+func (r *recorder) ModelCall(runtime.ModelCall) {}
 
 func newRunner(b bridge) *runner {
 	return &runner{logger: slog.New(slog.NewTextHandler(os.Stderr, nil)), bridge: b}
@@ -171,14 +240,16 @@ func TestRunStreamsTextAndTools(t *testing.T) {
 }
 
 func TestApprovalParksAndResumes(t *testing.T) {
+	// The turn ends when it parks, so a decision is replayed to OpenClaw. An
+	// approved command runs once, without a second approval. A rejected one does not run.
 	for _, tc := range []struct {
-		name     string
-		approved bool
-		want     string
-		isError  bool
+		name        string
+		approved    bool
+		want        string
+		wantResults int
 	}{
-		{"approved", true, "answer=allow-once", false},
-		{"rejected", false, "answer=deny", true},
+		{"approved", true, "answer=allow-once", 1},
+		{"rejected", false, "noted", 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			r := newRunner(newFakeBridge(t, "approval"))
@@ -202,7 +273,7 @@ func TestApprovalParksAndResumes(t *testing.T) {
 			if got := sink.text.String(); got != tc.want {
 				t.Errorf("text = %q, want %q", got, tc.want)
 			}
-			if len(sink.results) != 1 || sink.results[0].IsError != tc.isError {
+			if len(sink.results) != tc.wantResults || (tc.wantResults == 1 && sink.results[0].IsError) {
 				t.Errorf("results = %+v", sink.results)
 			}
 		})
@@ -215,7 +286,7 @@ func TestCancelPendingApproval(t *testing.T) {
 	if err != nil || out.Pending == nil {
 		t.Fatalf("expected a pending turn, got %+v, err = %v", out, err)
 	}
-	if err := out.Pending.Cancel(context.Background()); err != nil {
+	if err := out.Pending.Cancel(context.Background(), &recorder{}); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -253,5 +324,150 @@ func TestErrorTapParsesRunErrors(t *testing.T) {
 	}
 	if got := tap.since(time.Now().Add(time.Second)); got != "" {
 		t.Errorf("an old error must not be reported for a later turn, got %q", got)
+	}
+}
+
+// parkAndSuspend parks an approval on one runner and returns the journal path,
+// the way an actor does just before it is suspended.
+func parkAndSuspend(t *testing.T) string {
+	t.Helper()
+	journal := filepath.Join(t.TempDir(), "adapter", "pending.json")
+	r := newRunner(newFakeBridge(t, "approval"))
+	r.journal = journal
+	out, err := r.Run(context.Background(), runtime.Turn{TaskID: "task-1", ContextID: "ctx-1", Prompt: "uname"}, &recorder{})
+	if err != nil || out.Pending == nil {
+		t.Fatalf("expected a pending turn, got %+v, err = %v", out, err)
+	}
+	if _, err := os.Stat(journal); err != nil {
+		t.Fatalf("a parked approval must be journaled: %v", err)
+	}
+	return journal
+}
+
+func restoredRunner(t *testing.T, journal, scenario string) (*runner, runtime.PendingTurn) {
+	t.Helper()
+	r := newRunner(newFakeBridge(t, scenario))
+	r.journal = journal
+	taskID, contextID, pending, err := r.RestorePending()
+	if err != nil || pending == nil {
+		t.Fatalf("RestorePending = %q, %q, %v, %v", taskID, contextID, pending, err)
+	}
+	if taskID != "task-1" || contextID != "ctx-1" {
+		t.Errorf("restored task = %q, context = %q", taskID, contextID)
+	}
+	req, ok := pending.Request().(*runtime.ApprovalRequest)
+	if !ok || req.ID != "appr-1" || req.CallID != "c1" || req.Name != "exec" || req.Args["command"] != "uname -a" {
+		t.Fatalf("restored request = %+v", pending.Request())
+	}
+	return r, pending
+}
+
+func TestRestoredApprovalRunsTheApprovedCommandWithoutAskingAgain(t *testing.T) {
+	journal := parkAndSuspend(t)
+	r, pending := restoredRunner(t, journal, "replay")
+
+	sink := &recorder{}
+	out, err := pending.Resume(context.Background(), &runtime.ApprovalDecision{ID: "appr-1", Approved: true}, sink)
+	if err != nil || out.Failure != nil || out.Pending != nil {
+		t.Fatalf("resume outcome = %+v, err = %v", out, err)
+	}
+	got := sink.text.String()
+	if !strings.Contains(got, "approved this exec command") || !strings.Contains(got, "uname -a") {
+		t.Errorf("OpenClaw was not told what the user approved: %q", got)
+	}
+	if !strings.Contains(got, "answer=allow-once") {
+		t.Errorf("the approved command must be allowed when OpenClaw asks again: %q", got)
+	}
+	if _, err := os.Stat(r.journal); !os.IsNotExist(err) {
+		t.Errorf("the journal must be gone once the turn runs again: %v", err)
+	}
+}
+
+func TestRestoredRejectionTellsOpenClawWhy(t *testing.T) {
+	journal := parkAndSuspend(t)
+	_, pending := restoredRunner(t, journal, "replay")
+
+	sink := &recorder{}
+	out, err := pending.Resume(context.Background(), &runtime.ApprovalDecision{ID: "appr-1", RejectionReason: "wrong host"}, sink)
+	if err != nil || out.Failure != nil || out.Pending != nil {
+		t.Fatalf("resume outcome = %+v, err = %v", out, err)
+	}
+	got := sink.text.String()
+	if !strings.Contains(got, "rejected this exec command") || !strings.Contains(got, "wrong host") {
+		t.Errorf("the rejection and its reason must reach OpenClaw: %q", got)
+	}
+	if strings.Contains(got, "answer=") {
+		t.Errorf("a rejected command must not be run: %q", got)
+	}
+}
+
+func TestCancelRestoredApprovalRemovesTheJournal(t *testing.T) {
+	journal := parkAndSuspend(t)
+	_, pending := restoredRunner(t, journal, "replay")
+	if err := pending.Cancel(context.Background(), &recorder{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(journal); !os.IsNotExist(err) {
+		t.Errorf("the journal must be removed: %v", err)
+	}
+}
+
+func TestRestorePendingWithNothingParkedOrABrokenJournal(t *testing.T) {
+	r := newRunner(newFakeBridge(t, "plain"))
+	r.journal = filepath.Join(t.TempDir(), "pending.json")
+	if _, _, p, err := r.RestorePending(); p != nil || err != nil {
+		t.Fatalf("no journal: pending = %v, err = %v", p, err)
+	}
+	if err := os.WriteFile(r.journal, []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, p, err := r.RestorePending(); p != nil || err != nil {
+		t.Fatalf("broken journal: pending = %v, err = %v", p, err)
+	}
+	if _, err := os.Stat(r.journal); !os.IsNotExist(err) {
+		t.Error("a broken journal would wedge the actor, so it must be dropped")
+	}
+}
+
+func TestAnsweringALiveApprovalRemovesTheJournal(t *testing.T) {
+	journal := parkAndSuspend(t)
+	r := newRunner(newFakeBridge(t, "approval"))
+	r.journal = journal
+	out, err := r.Run(context.Background(), runtime.Turn{TaskID: "task-2", ContextID: "ctx-2", Prompt: "uname"}, &recorder{})
+	if err != nil || out.Pending == nil {
+		t.Fatalf("pending = %+v, err = %v", out, err)
+	}
+	if _, err := out.Pending.Resume(context.Background(), &runtime.ApprovalDecision{ID: "appr-1", Approved: true}, &recorder{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(journal); !os.IsNotExist(err) {
+		t.Errorf("the journal must be removed once the approval is answered: %v", err)
+	}
+}
+
+func TestErrorTapFollowsStartupRecovery(t *testing.T) {
+	tap := &errorTap{}
+	if tap.recoveryPending() {
+		t.Fatal("a gateway with nothing to recover logs nothing, and there is nothing to wait for")
+	}
+	_, _ = tap.Write([]byte("2026-11-05T17:27:50.918+00:00 [main-session-restart-recovery] marked 1 startup-orphaned main session(s) for restart recovery\n"))
+	if !tap.recoveryPending() {
+		t.Fatal("recovery began, but the gateway has not said how many runs it started")
+	}
+	_, _ = tap.Write([]byte("2026-11-05T17:27:54.357+00:00 [main-session-restart-recovery] main-session restart recovery startup complete: started=1 settled=0 failed=0 skipped=0\n"))
+	if !tap.recoveryPending() {
+		t.Fatal("one recovery run is still going")
+	}
+	// A line can arrive in two writes.
+	_, _ = tap.Write([]byte("2026-11-05T17:27:58.000+00:00 [main-session-restart-recovery] main-session restart recovery term"))
+	_, _ = tap.Write([]byte("inal: session=agent:main:kagent run=r1 status=ok reason=completed\n"))
+	if tap.recoveryPending() {
+		t.Fatal("the recovery run ended")
+	}
+
+	none := &errorTap{}
+	_, _ = none.Write([]byte("[main-session-restart-recovery] main-session restart recovery startup complete: started=0 settled=0 failed=0 skipped=0\n"))
+	if none.recoveryPending() {
+		t.Fatal("no recovery run was started, so there is nothing to wait for")
 	}
 }

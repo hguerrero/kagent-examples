@@ -7,7 +7,7 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/kagent-dev/kagent/go/api/adk"
+	configv1 "github.com/kagent-dev/kagent/go/api/gen/kagent/config/v1"
 )
 
 const (
@@ -21,11 +21,11 @@ var execModes = map[string]bool{"full": true, "auto": true, "ask": true, "allowl
 // buildConfig turns the configuration kagent compiled from the AgentTemplate
 // into an openclaw.json document. getenv resolves the credential placeholders
 // kagent leaves in MCP headers.
-func buildConfig(cfg *adk.AgentConfig, workspace, execMode string, getenv func(string) string) (map[string]any, error) {
-	if cfg.Model == nil {
+func buildConfig(cfg *configv1.ADKAgentConfig, workspace, execMode string, getenv func(string) string) (map[string]any, error) {
+	if cfg.GetModel() == nil {
 		return nil, fmt.Errorf("the AgentTemplate needs a modelConfig: OpenClaw has no default model")
 	}
-	primary, providers, err := translateModel(cfg.Model, getenv)
+	primary, providers, err := translateModel(cfg.GetModel(), getenv)
 	if err != nil {
 		return nil, err
 	}
@@ -33,7 +33,7 @@ func buildConfig(cfg *adk.AgentConfig, workspace, execMode string, getenv func(s
 	if err != nil {
 		return nil, err
 	}
-	if len(cfg.StdioTools) > 0 || len(cfg.RemoteAgents) > 0 || len(cfg.SubAgents) > 0 {
+	if len(cfg.GetStdioTools()) > 0 || len(cfg.GetRemoteAgents()) > 0 || len(cfg.GetSubAgents()) > 0 {
 		return nil, fmt.Errorf("stdio tools, remote agents and sub-agents are not supported by this adapter")
 	}
 	if execMode == "" {
@@ -76,34 +76,36 @@ func buildConfig(cfg *adk.AgentConfig, workspace, execMode string, getenv func(s
 // translateModel maps a kagent model onto an OpenClaw model reference. A model
 // on its provider's own endpoint needs nothing else: OpenClaw reads the API key
 // from the environment. A custom base URL needs a provider block.
-func translateModel(model adk.Model, getenv func(string) string) (string, map[string]any, error) {
-	switch m := model.(type) {
-	case *adk.Anthropic:
-		primary := "anthropic/" + m.Model
-		if m.BaseUrl == "" {
+func translateModel(model *configv1.ADKModelConfig, getenv func(string) string) (string, map[string]any, error) {
+	switch p := model.GetProvider().(type) {
+	case *configv1.ADKModelConfig_Anthropic:
+		primary := "anthropic/" + model.GetModel()
+		baseURL := p.Anthropic.GetBaseUrl()
+		if baseURL == "" {
 			return primary, nil, nil
 		}
 		maxTokens := 8192
-		if m.MaxTokens != nil {
-			maxTokens = *m.MaxTokens
+		if p.Anthropic.MaxTokens != nil {
+			maxTokens = int(*p.Anthropic.MaxTokens)
 		}
-		return primary, map[string]any{"anthropic": customProvider(m.BaseUrl, "anthropic-messages", getenv("ANTHROPIC_API_KEY"), m.Model, maxTokens)}, nil
-	case *adk.OpenAI:
-		primary := "openai/" + m.Model
-		if m.BaseUrl == "" || strings.HasPrefix(m.BaseUrl, "https://api.openai.com") {
+		return primary, map[string]any{"anthropic": customProvider(baseURL, "anthropic-messages", getenv("ANTHROPIC_API_KEY"), model.GetModel(), maxTokens)}, nil
+	case *configv1.ADKModelConfig_Openai:
+		primary := "openai/" + model.GetModel()
+		baseURL := p.Openai.GetBaseUrl()
+		if baseURL == "" || strings.HasPrefix(baseURL, "https://api.openai.com") {
 			return primary, nil, nil
 		}
 		api := "openai-completions"
-		if m.APIFormat == "responses" {
+		if p.Openai.GetApiFormat() == "responses" {
 			api = "openai-responses"
 		}
 		maxTokens := 8192
-		if m.MaxTokens != nil {
-			maxTokens = *m.MaxTokens
+		if p.Openai.MaxTokens != nil {
+			maxTokens = int(*p.Openai.MaxTokens)
 		}
-		return primary, map[string]any{"openai": customProvider(m.BaseUrl, api, getenv("OPENAI_API_KEY"), m.Model, maxTokens)}, nil
+		return primary, map[string]any{"openai": customProvider(baseURL, api, getenv("OPENAI_API_KEY"), model.GetModel(), maxTokens)}, nil
 	default:
-		return "", nil, fmt.Errorf("model type %q is not supported: use an Anthropic or OpenAI ModelConfig", model.GetType())
+		return "", nil, fmt.Errorf("model provider %T is not supported: use an Anthropic or OpenAI ModelConfig", p)
 	}
 }
 
@@ -118,9 +120,12 @@ func customProvider(baseURL, api, apiKey, model string, maxTokens int) map[strin
 
 // translateMCP maps the MCP servers bound to the AgentTemplate onto OpenClaw's
 // own MCP client registry. The template's tool list becomes a tool filter.
-func translateMCP(cfg *adk.AgentConfig, getenv func(string) string) (map[string]any, error) {
+func translateMCP(cfg *configv1.ADKAgentConfig, getenv func(string) string) (map[string]any, error) {
 	servers := map[string]any{}
-	add := func(rawURL, transport string, headers map[string]string, tools []string, requireApproval bool) error {
+	add := func(rawURL, transport string, headers map[string]string, tools []string, requireApproval, tokenPassthrough bool) error {
+		if tokenPassthrough {
+			return fmt.Errorf("tokenPassthrough on MCP server %s is not supported by this adapter", rawURL)
+		}
 		if requireApproval {
 			// OpenClaw gates MCP tool calls only in its Codex runtime. Refuse
 			// instead of running a tool the template says must be approved.
@@ -140,13 +145,13 @@ func translateMCP(cfg *adk.AgentConfig, getenv func(string) string) (map[string]
 		servers[serverName(rawURL, servers)] = entry
 		return nil
 	}
-	for _, t := range cfg.HttpTools {
-		if err := add(t.Params.Url, "streamable-http", t.Params.Headers, t.Tools, t.RequireApproval); err != nil {
+	for _, t := range cfg.GetHttpTools() {
+		if err := add(t.GetParams().GetUrl(), "streamable-http", t.GetParams().GetHeaders(), t.GetTools(), t.GetRequireApproval(), t.GetTokenPassthrough()); err != nil {
 			return nil, err
 		}
 	}
-	for _, t := range cfg.SseTools {
-		if err := add(t.Params.Url, "sse", t.Params.Headers, t.Tools, t.RequireApproval); err != nil {
+	for _, t := range cfg.GetSseTools() {
+		if err := add(t.GetParams().GetUrl(), "sse", t.GetParams().GetHeaders(), t.GetTools(), t.GetRequireApproval(), t.GetTokenPassthrough()); err != nil {
 			return nil, err
 		}
 	}
@@ -197,12 +202,12 @@ func expandHeaders(headers map[string]string, getenv func(string) string) (map[s
 
 // instructions is the AGENTS.md kagent manages. OpenClaw loads it at the start
 // of every session, and it replaced the removed systemPromptOverride setting.
-func instructions(cfg *adk.AgentConfig) string {
-	if strings.TrimSpace(cfg.Instruction) == "" {
+func instructions(cfg *configv1.ADKAgentConfig) string {
+	if strings.TrimSpace(cfg.GetInstruction()) == "" {
 		return ""
 	}
 	return "<!-- Managed by kagent from the AgentTemplate system prompt. Edits are overwritten when the actor starts. -->\n\n" +
-		strings.TrimSpace(cfg.Instruction) + "\n"
+		strings.TrimSpace(cfg.GetInstruction()) + "\n"
 }
 
 func marshalConfig(doc map[string]any) ([]byte, error) {

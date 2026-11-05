@@ -6,7 +6,8 @@ metadata:
 spec:
   byo: {}
   workload:
-    image: hguerrero0/openclaw-agent@sha256:7a3eefd32a5d9ec24911781f8857b7f6f8de34cdec9a341d7b96b082d5572d30
+    # Example only: the maintainer's test image. Build and push your own and replace this digest (see the README).
+    image: hguerrero0/openclaw-agent@sha256:070faa615d630c284b65bc3caf1de7b1f640c0426da4ba9c27d2c8bcb680775d
     command: ["/usr/local/bin/openclaw-a2a-adapter"]       # the adapter binary baked into the image
   env:
     - name: OPENCLAW_EXEC_MODE
@@ -35,7 +36,8 @@ metadata:
   name: openclaw
   namespace: kagent
 spec:
-  templateRef:
-    name: openclaw-template
+  template:
+    ref:
+      name: openclaw-template
   harnessRef:
     name: openclaw-harness

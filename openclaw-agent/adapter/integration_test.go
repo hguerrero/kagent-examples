@@ -14,7 +14,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/kagent-dev/kagent/go/api/adk"
+	configv1 "github.com/kagent-dev/kagent/go/api/gen/kagent/config/v1"
 	"github.com/kagent-dev/kagent/go/harness/runtime"
 )
 
@@ -56,7 +56,8 @@ func (m *scriptedModel) handle(w http.ResponseWriter, r *http.Request) {
 	}
 	var body struct {
 		Messages []struct {
-			Role string `json:"role"`
+			Role    string `json:"role"`
+			Content any    `json:"content"`
 		} `json:"messages"`
 		Tools []struct {
 			Function struct {
@@ -67,9 +68,20 @@ func (m *scriptedModel) handle(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewDecoder(r.Body).Decode(&body)
 	roles := make([]string, 0, len(body.Messages))
 	hasToolResult, hasExec := false, false
-	for _, msg := range body.Messages {
+	replay := -1 // the message that says the user approved a command before a restart
+	for i, msg := range body.Messages {
 		roles = append(roles, msg.Role)
 		hasToolResult = hasToolResult || msg.Role == "tool"
+		if msg.Role == "user" && strings.Contains(contentText(msg.Content), "approved this exec command") {
+			replay = i
+		}
+	}
+	if replay >= 0 {
+		// A replayed approval: run the command once, unless a result already follows it.
+		hasToolResult = false
+		for _, msg := range body.Messages[replay+1:] {
+			hasToolResult = hasToolResult || msg.Role == "tool"
+		}
 	}
 	for _, tool := range body.Tools {
 		hasExec = hasExec || tool.Function.Name == "exec"
@@ -84,7 +96,11 @@ func (m *scriptedModel) handle(w http.ResponseWriter, r *http.Request) {
 		return "data: " + string(b) + "\n\n"
 	}
 	w.Header().Set("content-type", "text/event-stream")
-	if !hasToolResult && hasExec {
+	rejectedReplay := false
+	for _, msg := range body.Messages {
+		rejectedReplay = rejectedReplay || (msg.Role == "user" && strings.Contains(contentText(msg.Content), "rejected this exec command"))
+	}
+	if !hasToolResult && hasExec && !rejectedReplay {
 		args, _ := json.Marshal(map[string]any{"command": "echo from-the-actor"})
 		fmt.Fprint(w, chunk(map[string]any{"role": "assistant", "tool_calls": []any{map[string]any{
 			"index": 0, "id": "call_1", "type": "function", "function": map[string]any{"name": "exec", "arguments": string(args)}}}}, nil))
@@ -94,6 +110,25 @@ func (m *scriptedModel) handle(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprint(w, chunk(map[string]any{}, "stop"))
 	}
 	fmt.Fprint(w, "data: [DONE]\n\n")
+}
+
+// contentText flattens a chat message's content, which is a string or a list of parts.
+func contentText(c any) string {
+	switch v := c.(type) {
+	case string:
+		return v
+	case []any:
+		var sb strings.Builder
+		for _, part := range v {
+			if p, ok := part.(map[string]any); ok {
+				if text, ok := p["text"].(string); ok {
+					sb.WriteString(text)
+				}
+			}
+		}
+		return sb.String()
+	}
+	return ""
 }
 
 func (m *scriptedModel) count() int {
@@ -117,7 +152,10 @@ func bootActor(t *testing.T, model *scriptedModel, root, execMode string) *actor
 			t.Fatal(err)
 		}
 	}
-	cfg := &adk.AgentConfig{Model: &adk.OpenAI{BaseModel: adk.BaseModel{Model: "mock-1"}, BaseUrl: model.server.URL + "/v1"}}
+	cfg := &configv1.ADKAgentConfig{Model: &configv1.ADKModelConfig{
+		Model:    "mock-1",
+		Provider: &configv1.ADKModelConfig_Openai{Openai: &configv1.ADKOpenAI{BaseUrl: model.server.URL + "/v1"}},
+	}}
 	doc, err := buildConfig(cfg, workspace, execMode, func(k string) string { return "kagent-credential-injected" })
 	if err != nil {
 		t.Fatal(err)
@@ -134,7 +172,7 @@ func bootActor(t *testing.T, model *scriptedModel, root, execMode string) *actor
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { b.stop() })
-	return &actor{bridge: b, runner: &runner{logger: logger, bridge: b}}
+	return &actor{bridge: b, runner: &runner{logger: logger, bridge: b, journal: filepath.Join(root, "adapter", "pending.json")}}
 }
 
 // stop kills OpenClaw without a clean shutdown, like an actor going away.
@@ -148,6 +186,22 @@ func (b *openclawBridge) stop() {
 	if b.gateway != nil && b.gateway.Process != nil {
 		_ = b.gateway.Process.Kill()
 		<-b.gwExited
+	}
+}
+
+// crash kills the gateway first and the ACP bridge after it, like a suspend that
+// takes the whole actor at once. Unlike stop, the gateway never sees the bridge
+// leave, so it still counts the parked session as running when it comes back.
+func (b *openclawBridge) crash() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.gateway != nil && b.gateway.Process != nil {
+		_ = b.gateway.Process.Kill()
+		<-b.gwExited
+	}
+	if b.client != nil {
+		b.client.close()
+		b.client = nil
 	}
 }
 
@@ -197,8 +251,13 @@ func TestIntegrationExecApprovalParksTheTurn(t *testing.T) {
 			if err != nil || out.Failure != nil || out.Pending != nil {
 				t.Fatalf("resume outcome = %+v, err = %v", out, err)
 			}
-			if len(sink.results) != 1 || sink.results[0].IsError == approved {
+			// The turn ended when it parked, so the decision was replayed: an approved
+			// command runs once without asking again, and a rejected one does not run.
+			if approved && (len(sink.results) != 1 || sink.results[0].IsError) {
 				t.Errorf("results = %+v", sink.results)
+			}
+			if !approved && len(sink.results) != 0 {
+				t.Errorf("a rejected command must not run: %+v", sink.results)
 			}
 			if !strings.Contains(sink.text.String(), "The command finished.") {
 				t.Errorf("text = %q", sink.text.String())
@@ -236,5 +295,53 @@ func TestIntegrationConversationSurvivesARestart(t *testing.T) {
 	model.mu.Unlock()
 	if longest < 5 {
 		t.Fatalf("the second boot did not see the first conversation: its longest request had %d messages", longest)
+	}
+}
+
+// An approval parked just before a suspend is answered after the actor comes
+// back: OpenClaw is a new process, so the turn is rebuilt from the journal.
+func TestIntegrationApprovalSurvivesASuspend(t *testing.T) {
+	integration(t)
+	for _, approved := range []bool{true, false} {
+		t.Run(fmt.Sprintf("approved=%v", approved), func(t *testing.T) {
+			model := newScriptedModel(t)
+			root := t.TempDir()
+
+			first := bootActor(t, model, root, "ask")
+			out, err := first.runner.Run(context.Background(), runtime.Turn{TaskID: "task-1", ContextID: "ctx-1", Prompt: "Run a command."}, &recorder{})
+			if err != nil || out.Pending == nil {
+				t.Fatalf("expected a pending approval, got %+v, err = %v", out, err)
+			}
+			first.bridge.crash() // the suspend: processes go, /data stays
+
+			second := bootActor(t, model, root, "ask")
+			taskID, contextID, pending, err := second.runner.RestorePending()
+			if err != nil || pending == nil || taskID != "task-1" || contextID != "ctx-1" {
+				t.Fatalf("RestorePending = %q, %q, %v, %v", taskID, contextID, pending, err)
+			}
+			req := pending.Request().(*runtime.ApprovalRequest)
+			if req.Name != "exec" || req.Args["command"] != "echo from-the-actor" {
+				t.Fatalf("restored request = %+v", req)
+			}
+
+			sink := &recorder{}
+			out, err = pending.Resume(context.Background(), &runtime.ApprovalDecision{ID: req.ID, Approved: approved, RejectionReason: "not now"}, sink)
+			if err != nil || out.Failure != nil || out.Pending != nil {
+				t.Fatalf("resume outcome = %+v, err = %v", out, err)
+			}
+			if approved {
+				if len(sink.results) != 1 || sink.results[0].IsError || !strings.Contains(fmt.Sprint(sink.results[0].Result), "from-the-actor") {
+					t.Errorf("the approved command must run once, without a second approval: %+v", sink.results)
+				}
+			} else if len(sink.results) != 0 {
+				t.Errorf("a rejected command must not run: %+v", sink.results)
+			}
+			if !strings.Contains(sink.text.String(), "The command finished.") {
+				t.Errorf("text = %q", sink.text.String())
+			}
+			if _, err := os.Stat(filepath.Join(root, "adapter", "pending.json")); !os.IsNotExist(err) {
+				t.Errorf("the journal must be gone: %v", err)
+			}
+		})
 	}
 }
