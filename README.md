@@ -15,12 +15,12 @@ Worked examples for [kagent](https://kagent.dev) 1.x and Agent Substrate. Each e
 
 ## Prerequisites
 
-The examples that run agents on Agent Substrate (`claude-code-from-openshell`, `pi-agent`, `openclaw-agent`) need the same base setup. `kgateway-ingress`, `agentgateway-ingress` and `agentgateway-trusted-proxy` need only a running kagent 1.x and list their own prerequisites.
+The examples that run agents on Agent Substrate (`claude-code-from-openshell`, `pi-agent`, `openclaw-agent`) need the same base setup. `agentgateway-trusted-proxy` needs only a running kagent 1.x and lists its own prerequisites.
 
 The Substrate examples need:
 
-- A Kubernetes cluster (1.37 or later, with the `certificates.k8s.io/v1beta1` API enabled) running Agent Substrate and kagent 1.x, with a worker pool named `kagent-default`.
-- On your machine: `kubectl`, `helm`, the `kagent` CLI, the `kubectl-ate` plugin, and `jq`. Docker is needed for examples that build an image.
+- A Kubernetes cluster, 1.37 or later, that serves the `PodCertificateRequest` and `ClusterTrustBundle` APIs (a default `kind` node on v1.37 does), running Agent Substrate and kagent 1.x, with a worker pool named `kagent-default`.
+- On your machine: `kubectl`, `helm`, the `kagent` CLI, the `kubectl-ate` plugin, and `jq`. Docker and a registry you can push to are needed for the examples that run an adapter image (`pi-agent` and `openclaw-agent`).
 
 An example's own README lists anything it needs beyond this, such as API keys.
 
@@ -63,12 +63,12 @@ export OPENAI_API_KEY=<the provider key you installed kagent with>
 kagent --config kagent-config.yaml install --namespace kagent
 ```
 
-`kagent install` was run on a fresh kind cluster on 2026-11-05 and worked in one pass for `claude-code-from-openshell`. Plan for about 4 GB of memory for the cluster: with 2.6 GB the controller stayed `Pending`. See the example READMEs for what each one ran.
+On 2026-11-05 `kagent install` worked in one pass on fresh `kind` clusters, and every example was tested on a cluster installed this way. Plan for about 4 GB of memory for the cluster: with 2.6 GB the controller stayed `Pending`. See the example READMEs for what each one ran.
 
 ## How the examples are organized
 
 - Each example lives in its own folder with its own `README.md`, and you can run it without the rest of the repo.
-- Each README has a "Tested with" table. kagent 1.x and Substrate are alpha releases that change often, so versions are pinned per example and not for the whole repo. Check the [kagent 1.x docs](https://kagent.dev/docs/kagent/1.x/) for current ones.
+- Each README has a "Tested with" table. kagent 1.x and Substrate are release candidates that can still change, so versions are pinned per example and not for the whole repo. Check the [kagent 1.x docs](https://kagent.dev/docs/kagent/1.x/) for current ones.
 - Container images are referenced by digest, because Substrate pins images that way. For the examples with an adapter, you build and push your own image and put its digest in the manifest. The digests already in the manifests are the maintainer's test images, kept as an example of the format.
 - A `TROUBLESHOOTING.md` next to an example's README covers the errors most likely to hit.
 
